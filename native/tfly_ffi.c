@@ -150,6 +150,32 @@ void tfly_clear_actions(TFlyHandle *h) {
     for (int i = 0; i < TFLY_N_ACTION; i++) h->action[i] = 0.0f;
 }
 
+/* ---- face ---- */
+float tfly_blink(TFlyHandle *h) { return h->blink; }
+float tfly_gaze_x(TFlyHandle *h) { return h->gaze_x; }
+float tfly_gaze_y(TFlyHandle *h) { return h->gaze_y; }
+float tfly_pupil(TFlyHandle *h) { return h->pupil; }
+float tfly_brow(TFlyHandle *h) { return h->brow; }
+float tfly_mouth(TFlyHandle *h) { return h->mouth; }
+float tfly_mouth_open(TFlyHandle *h) { return h->mouth_open; }
+float tfly_blush(TFlyHandle *h) { return h->blush; }
+float tfly_tears(TFlyHandle *h) { return h->tears; }
+float tfly_sweat(TFlyHandle *h) { return h->sweat; }
+
+/* ---- gesture and social ---- */
+int tfly_gesture(TFlyHandle *h) { return h->gesture; }
+float tfly_gesture_strength(TFlyHandle *h) { return h->gesture_strength; }
+float tfly_gesture_phase(TFlyHandle *h) { return h->gesture_phase; }
+float tfly_bond(TFlyHandle *h) { return h->bond; }
+int tfly_can_encounter(TFlyHandle *h) { return TCanEncounter(h); }
+float tfly_encounter_drive(TFlyHandle *h) { return TEncounterDrive(h); }
+int tfly_last_encounter(TFlyHandle *h) { return h->last_encounter; }
+void tfly_gesture_start(TFlyHandle *h, int g) { TGesture(h, g); }
+void tfly_gesture_force(TFlyHandle *h, int g) { TGestureForce(h, g); }
+const char *tfly_gesture_name(int g) { return TFlyGestureName(g); }
+const char *tfly_encounter_name(int e) { return TFlyEncounterName(e); }
+int tfly_encounter(TFlyHandle *a, TFlyHandle *b, int kind) { return TEncounter(a, b, kind); }
+
 /* ---- gait ---- */
 void tfly_set_gait(TFlyHandle *h, int g) { TSetGait(h, g); }
 float tfly_gait_weight(TFlyHandle *h, int g) { return TGaitWeight(h, g); }

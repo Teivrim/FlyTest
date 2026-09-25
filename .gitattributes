@@ -1,0 +1,15 @@
+# Normalise line endings in the repository.
+#
+# Without this, an editor or shell that writes CRLF on Windows produces a
+# whole-file diff for a one-line change, which hides the real change in
+# noise. The working tree is checked out with LF; Windows tools that need
+# CRLF add it themselves.
+* text=auto eol=lf
+
+# Binary assets must never be line-ending translated.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.fbx binary
+*.blend binary
+*.gz binary

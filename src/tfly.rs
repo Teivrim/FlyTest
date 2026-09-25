@@ -164,6 +164,28 @@ unsafe extern "C" {
     fn tfly_gait_phase(handle: *mut TFlyHandle) -> c_float;
     fn tfly_step_count(handle: *mut TFlyHandle) -> c_float;
     fn tfly_balance(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_blink(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_gaze_x(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_gaze_y(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_pupil(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_brow(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_mouth(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_mouth_open(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_blush(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_tears(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_sweat(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_gesture(handle: *mut TFlyHandle) -> c_int;
+    fn tfly_gesture_strength(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_gesture_phase(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_bond(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_can_encounter(handle: *mut TFlyHandle) -> c_int;
+    fn tfly_encounter_drive(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_last_encounter(handle: *mut TFlyHandle) -> c_int;
+    fn tfly_gesture_start(handle: *mut TFlyHandle, g: c_int);
+    fn tfly_gesture_force(handle: *mut TFlyHandle, g: c_int);
+    fn tfly_gesture_name(g: c_int) -> *const c_char;
+    fn tfly_encounter_name(e: c_int) -> *const c_char;
+    fn tfly_encounter(a: *mut TFlyHandle, b: *mut TFlyHandle, kind: c_int) -> c_int;
 
     fn tfly_to_json(handle: *mut TFlyHandle, buf: *mut c_char, cap: c_int) -> c_int;
     fn tfly_hormone_name(id: c_int) -> *const c_char;
@@ -301,6 +323,29 @@ pub mod emotion {
         ("trust", TRUST),
         ("longing", LONGING),
     ];
+}
+
+/// Gestures, matching `T_GES_*` in the header.
+pub mod gesture {
+    pub const IDLE: i32 = 0;
+    pub const WAVE: i32 = 1;
+    pub const BOW: i32 = 2;
+    pub const CLAP: i32 = 3;
+    pub const POINT: i32 = 4;
+    pub const COVER: i32 = 5;
+    pub const SHRUG: i32 = 6;
+    pub const HOLD: i32 = 7;
+}
+
+/// Encounters between two flies, matching `T_ENC_*`.
+pub mod encounter {
+    pub const GREET: i32 = 0;
+    pub const BOW: i32 = 1;
+    pub const HIGH_FIVE: i32 = 2;
+    pub const COMFORT: i32 = 3;
+    pub const SHARE: i32 = 4;
+    pub const ARGUE: i32 = 5;
+    pub const IGNORE: i32 = 6;
 }
 
 /// Gait presets the fly can learn to walk with.
@@ -1097,6 +1142,118 @@ impl Fly {
         unsafe { tfly_balance(self.ptr()) }
     }
 
+    // ---- face -------------------------------------------------------
+
+    /// How closed the eyelids are, 0 open and 1 shut.
+    #[must_use]
+    pub fn blink(&self) -> f32 {
+        unsafe { tfly_blink(self.ptr()) }
+    }
+    /// Horizontal gaze, -1 left to 1 right.
+    #[must_use]
+    pub fn gaze_x(&self) -> f32 {
+        unsafe { tfly_gaze_x(self.ptr()) }
+    }
+    /// Vertical gaze, -1 down to 1 up.
+    #[must_use]
+    pub fn gaze_y(&self) -> f32 {
+        unsafe { tfly_gaze_y(self.ptr()) }
+    }
+    /// Pupil dilation, 0.5 constricted to 1.6 wide.
+    #[must_use]
+    pub fn pupil(&self) -> f32 {
+        unsafe { tfly_pupil(self.ptr()) }
+    }
+    /// Brow position, -1 frowning to 1 raised.
+    #[must_use]
+    pub fn brow(&self) -> f32 {
+        unsafe { tfly_brow(self.ptr()) }
+    }
+    /// Mouth curve, -1 frown to 1 smile.
+    #[must_use]
+    pub fn mouth(&self) -> f32 {
+        unsafe { tfly_mouth(self.ptr()) }
+    }
+    /// How open the mouth is, 0 closed to 1 wide.
+    #[must_use]
+    pub fn mouth_open(&self) -> f32 {
+        unsafe { tfly_mouth_open(self.ptr()) }
+    }
+    /// Blush intensity, 0..1.
+    #[must_use]
+    pub fn blush(&self) -> f32 {
+        unsafe { tfly_blush(self.ptr()) }
+    }
+    /// Tears, 0..1. Builds while she is sad, drains when she is not.
+    #[must_use]
+    pub fn tears(&self) -> f32 {
+        unsafe { tfly_tears(self.ptr()) }
+    }
+    /// Sweat, 0..1. Tracks nerves and awkwardness.
+    #[must_use]
+    pub fn sweat(&self) -> f32 {
+        unsafe { tfly_sweat(self.ptr()) }
+    }
+
+    // ---- gesture and social -------------------------------------------
+
+    /// The pose currently being held, from the `gesture` module.
+    #[must_use]
+    pub fn gesture(&self) -> i32 {
+        unsafe { tfly_gesture(self.ptr()) }
+    }
+    /// Envelope of the current pose, 0..1.
+    #[must_use]
+    pub fn gesture_strength(&self) -> f32 {
+        unsafe { tfly_gesture_strength(self.ptr()) }
+    }
+    /// Progress through the current pose, 0..1.
+    #[must_use]
+    pub fn gesture_phase(&self) -> f32 {
+        unsafe { tfly_gesture_phase(self.ptr()) }
+    }
+    /// Start a pose, if nothing else is at full strength.
+    pub fn play_gesture(&mut self, gesture: i32) {
+        unsafe { tfly_gesture_start(self.ptr(), gesture) }
+    }
+    /// Start a pose, interrupting whatever was running.
+    ///
+    /// Used for direct control, where a silently dropped request would be
+    /// worse than a pose cut short.
+    pub fn force_gesture(&mut self, gesture: i32) {
+        unsafe { tfly_gesture_force(self.ptr(), gesture) }
+    }
+    /// Depth of the relationship, 0..1. Grows with kind encounters.
+    #[must_use]
+    pub fn bond(&self) -> f32 {
+        unsafe { tfly_bond(self.ptr()) }
+    }
+    /// Whether an encounter is allowed right now (cooldown permitting).
+    #[must_use]
+    pub fn can_encounter(&self) -> bool {
+        unsafe { tfly_can_encounter(self.ptr()) != 0 }
+    }
+    /// How inclined she is to start an encounter, 0..1.
+    #[must_use]
+    pub fn encounter_drive(&self) -> f32 {
+        unsafe { tfly_encounter_drive(self.ptr()) }
+    }
+    /// The last encounter performed, from the `encounter` module.
+    #[must_use]
+    pub fn last_encounter(&self) -> i32 {
+        unsafe { tfly_last_encounter(self.ptr()) }
+    }
+    /// Russian name of a gesture.
+    #[must_use]
+    pub fn gesture_name(gesture: i32) -> &'static str {
+        cstr_to_name(unsafe { tfly_gesture_name(gesture) })
+    }
+    /// Russian name of an encounter.
+    #[must_use]
+    pub fn encounter_name(encounter: i32) -> &'static str {
+        cstr_to_name(unsafe { tfly_encounter_name(encounter) })
+    }
+
     /// The gait the fly currently prefers, breaking ties with its own RNG.
     #[must_use]
     pub fn preferred_gait(&self) -> i32 {
@@ -1123,6 +1280,251 @@ impl Fly {
             .collect();
         out.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         out
+    }
+}
+
+/// Result of an encounter between two flies.
+#[derive(Debug, Clone, Copy)]
+pub struct Meeting {
+    /// True if the encounter actually ran, rather than hitting a cooldown.
+    pub happened: bool,
+    /// Bond after the encounter.
+    pub bond: f32,
+}
+
+/// Let two flies meet.
+///
+/// The two handles are distinct pointers, so there is no aliasing and the C
+/// side does not re-enter. The aliasing case is rejected rather than
+/// tolerated, because borrowing the same fly twice would be a caller bug and
+/// silently corrupting her state would hide it.
+pub fn meet(a: &mut Fly, b: &mut Fly, kind: i32) -> Meeting {
+    if std::ptr::eq(a.ptr(), b.ptr()) {
+        return Meeting {
+            happened: false,
+            bond: a.bond(),
+        };
+    }
+    let happened = unsafe { tfly_encounter(a.ptr(), b.ptr(), kind) != 0 };
+    Meeting {
+        happened,
+        bond: a.bond(),
+    }
+}
+
+#[cfg(test)]
+mod face_tests {
+    use super::*;
+    use crate::tfly::{encounter, gesture};
+
+    /// Every face channel must stay inside its declared range under load.
+    #[test]
+    fn face_channels_stay_in_range() {
+        let mut fly = Fly::new();
+        fly.seed(17);
+        for i in 0..4000 {
+            fly.heart(fly.random(), (fly.random() * 10.0) as i32);
+            fly.reward(fly.random());
+            fly.punish(fly.random());
+            fly.mate_signal(fly.random());
+            fly.predator_signal(fly.random());
+            fly.steps(1, 1.0 / 60.0);
+            if i % 400 == 0 {
+                assert!((0.0..=1.0).contains(&fly.blink()), "blink {}", fly.blink());
+                assert!((-1.0..=1.0).contains(&fly.gaze_x()));
+                assert!((-1.0..=1.0).contains(&fly.gaze_y()));
+                assert!((0.5..=1.6).contains(&fly.pupil()), "pupil {}", fly.pupil());
+                assert!((-1.0..=1.0).contains(&fly.brow()));
+                assert!((-1.0..=1.0).contains(&fly.mouth()));
+                assert!((0.0..=1.0).contains(&fly.mouth_open()));
+                assert!((0.0..=1.0).contains(&fly.blush()));
+                assert!((0.0..=1.0).contains(&fly.tears()));
+                assert!((0.0..=1.0).contains(&fly.sweat()));
+            }
+        }
+    }
+
+    /// Sleeping closes the eyes. That is the most obvious sign the face is
+    /// driven by state rather than by a timer.
+    #[test]
+    fn sleep_closes_the_eyes() {
+        let mut fly = Fly::new();
+        fly.seed(3);
+        for _ in 0..30 {
+            fly.steps(1, 1.0 / 60.0);
+        }
+        let awake = fly.blink();
+        fly.sleep();
+        for _ in 0..120 {
+            fly.steps(1, 1.0 / 60.0);
+        }
+        assert!(
+            fly.blink() > awake,
+            "a sleeping fly must close her eyes: awake={awake} asleep={}",
+            fly.blink()
+        );
+    }
+
+    /// Fear must widen the eyes, which is the point of having pupils.
+    #[test]
+    fn fear_dilates_the_pupils() {
+        let mut calm = Fly::new();
+        let mut scared = Fly::new();
+        calm.seed(9);
+        scared.seed(9);
+        for _ in 0..600 {
+            calm.steps(1, 1.0 / 60.0);
+            scared.fear(0.05);
+            scared.steps(1, 1.0 / 60.0);
+        }
+        assert!(
+            scared.pupil() > calm.pupil(),
+            "fear must dilate: calm={} scared={}",
+            calm.pupil(),
+            scared.pupil()
+        );
+    }
+
+    /// Joy must raise the mouth into a smile and fear must pull it down.
+    #[test]
+    fn joy_smiles_and_fear_frowns() {
+        let mut happy = Fly::new();
+        let mut afraid = Fly::new();
+        happy.seed(4);
+        afraid.seed(4);
+        for _ in 0..600 {
+            happy.joy(0.05);
+            happy.steps(1, 1.0 / 60.0);
+            afraid.fear(0.05);
+            afraid.steps(1, 1.0 / 60.0);
+        }
+        assert!(happy.mouth() > 0.0, "joy must smile: {}", happy.mouth());
+        assert!(afraid.mouth() < 0.0, "fear must frown: {}", afraid.mouth());
+    }
+
+    /// Tears must build while sad and drain once she is happy again.
+    #[test]
+    fn tears_build_and_drain() {
+        let mut fly = Fly::new();
+        fly.seed(6);
+        fly.sadness(0.6);
+        for _ in 0..600 {
+            fly.steps(1, 1.0 / 60.0);
+        }
+        let wet = fly.tears();
+        assert!(wet > 0.0, "sadness must produce tears, got {wet}");
+        fly.joy(0.8);
+        for _ in 0..1200 {
+            fly.steps(1, 1.0 / 60.0);
+        }
+        assert!(
+            fly.tears() < wet,
+            "tears must drain once she is happy: {wet} -> {}",
+            fly.tears()
+        );
+    }
+
+    /// A kind encounter must deepen the bond on both sides.
+    #[test]
+    fn an_encounter_deepens_the_bond_on_both_sides() {
+        let mut a = Fly::new();
+        let mut b = Fly::new();
+        a.seed(1);
+        b.seed(2);
+        let before_a = a.bond();
+        let before_b = b.bond();
+        let meeting = meet(&mut a, &mut b, encounter::SHARE);
+        assert!(meeting.happened, "the first encounter must run");
+        assert!(a.bond() > before_a, "bond must grow");
+        assert!(b.bond() > before_b, "bond must grow on both sides");
+        assert!(a.emotion_level(emotion::JOY) > 0.0);
+        assert!(b.emotion_level(emotion::TRUST) > 0.0);
+    }
+
+    /// A quarrel must damage the bond, not grow it.
+    #[test]
+    fn a_quarrel_breaks_the_bond() {
+        let mut a = Fly::new();
+        let mut b = Fly::new();
+        a.seed(1);
+        b.seed(2);
+        for _ in 0..4 {
+            let _ = meet(&mut a, &mut b, encounter::SHARE);
+            a.steps(400, 1.0 / 60.0);
+            b.steps(400, 1.0 / 60.0);
+        }
+        let strong = a.bond();
+        assert!(strong > 0.2, "bond should build first, got {strong}");
+        let _ = meet(&mut a, &mut b, encounter::ARGUE);
+        assert!(
+            a.bond() < strong,
+            "a quarrel must reduce the bond: {strong} -> {}",
+            a.bond()
+        );
+    }
+
+    /// The cooldown must stop a pair repeating one encounter.
+    #[test]
+    fn encounters_respect_the_cooldown() {
+        let mut a = Fly::new();
+        let mut b = Fly::new();
+        a.seed(1);
+        b.seed(2);
+        assert!(meet(&mut a, &mut b, encounter::GREET).happened);
+        assert!(!a.can_encounter(), "an encounter must start a cooldown");
+        assert!(
+            !meet(&mut a, &mut b, encounter::GREET).happened,
+            "the second greeting must be refused"
+        );
+        a.steps(600, 1.0 / 60.0);
+        b.steps(600, 1.0 / 60.0);
+        assert!(a.can_encounter(), "the cooldown must expire");
+    }
+
+    /// A gesture must run to completion and release back to idle.
+    #[test]
+    fn a_gesture_runs_then_releases() {
+        let mut fly = Fly::new();
+        fly.seed(8);
+        assert_eq!(fly.gesture(), gesture::IDLE);
+        fly.play_gesture(gesture::WAVE);
+        assert_eq!(fly.gesture(), gesture::WAVE);
+        fly.steps(40, 1.0 / 60.0);
+        assert!(fly.gesture_strength() > 0.5, "the pose must build");
+        assert!(fly.gesture_phase() > 0.0);
+        fly.steps(120, 1.0 / 60.0);
+        assert_eq!(fly.gesture(), gesture::IDLE, "the pose must release");
+    }
+
+    /// A fly cannot meet herself.
+    ///
+    /// The borrow checker already rejects `meet(&mut fly, &mut fly, ..)`, so
+    /// the guard inside `meet` is belt and braces for a future caller holding
+    /// raw handles. What is testable here is the state that guard protects: a
+    /// refused encounter must leave bond and affect untouched.
+    #[test]
+    fn a_refused_encounter_changes_nothing() {
+        let mut a = Fly::new();
+        let mut b = Fly::new();
+        a.seed(2);
+        b.seed(5);
+        // The first meeting runs and starts the cooldown.
+        assert!(meet(&mut a, &mut b, encounter::GREET).happened);
+        let bond_a = a.bond();
+        let joy_a = a.emotion_level(emotion::JOY);
+        // The second is refused.
+        let refused = meet(&mut a, &mut b, encounter::SHARE);
+        assert!(!refused.happened, "the cooldown must refuse it");
+        assert_eq!(
+            a.bond(),
+            bond_a,
+            "a refused encounter must not move the bond"
+        );
+        assert_eq!(
+            a.emotion_level(emotion::JOY),
+            joy_a,
+            "a refused encounter must not move affect"
+        );
     }
 }
 

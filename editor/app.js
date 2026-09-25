@@ -533,23 +533,74 @@ function createFlyVisual(agent) {
   head.add(face);
 
   // Anime eyes: a large dark iris under a highlight, set wide on the face.
-  const eyeWhite = new THREE.Mesh(new THREE.SphereGeometry(0.034, 12, 10), new THREE.MeshBasicMaterial({ color: '#ffffff' }));
-  eyeWhite.scale.set(1.15, 0.9, 0.5);
-  const eyeL = eyeWhite.clone(); eyeL.position.set(-0.048, 0.012, 0.100); head.add(eyeL);
-  const eyeR = eyeWhite.clone(); eyeR.position.set(0.048, 0.012, 0.100); head.add(eyeR);
+  // Each eye is a group so the pupil can slide inside the whites and the
+  // lids can drop over the top, which is what makes an expression read.
+  const eyeWhiteMaterial = new THREE.MeshBasicMaterial({ color: '#ffffff' });
   const irisMaterial = new THREE.MeshBasicMaterial({ color: '#2b1a3d' });
-  const irisL = new THREE.Mesh(new THREE.SphereGeometry(0.021, 12, 10), irisMaterial);
-  irisL.scale.set(1, 1, 0.5); irisL.position.set(-0.048, 0.010, 0.118); head.add(irisL);
-  const irisR = irisL.clone(); irisR.position.x = 0.048; head.add(irisR);
   const shineMaterial = new THREE.MeshBasicMaterial({ color: '#ffffff' });
-  const shineL = new THREE.Mesh(new THREE.SphereGeometry(0.008, 8, 6), shineMaterial);
-  shineL.position.set(-0.056, 0.028, 0.132); head.add(shineL);
-  const shineR = shineL.clone(); shineR.position.x = 0.040; head.add(shineR);
+  function makeEye(sign) {
+    const g = new THREE.Group();
+    g.position.set(sign * 0.048, 0.012, 0.098);
+    const white = new THREE.Mesh(new THREE.SphereGeometry(0.034, 14, 12), eyeWhiteMaterial);
+    white.scale.set(1.15, 0.9, 0.45);
+    g.add(white);
+    const iris = new THREE.Mesh(new THREE.SphereGeometry(0.021, 14, 12), irisMaterial);
+    iris.scale.set(1, 1, 0.45);
+    iris.position.z = 0.018;
+    g.add(iris);
+    const shine = new THREE.Mesh(new THREE.SphereGeometry(0.008, 8, 6), shineMaterial);
+    shine.position.set(-0.008 * sign, 0.010, 0.032);
+    g.add(shine);
+    // Upper lid: a skin-coloured dome that rotates down over the eye.
+    const lid = new THREE.Mesh(new THREE.SphereGeometry(0.037, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.5), material(SKIN));
+    lid.rotation.x = -1.35;
+    lid.position.z = 0.006;
+    g.add(lid);
+    return { group: g, iris, shine, lid };
+  }
+  const eyeL = makeEye(-1);
+  const eyeR = makeEye(1);
+  head.add(eyeL.group);
+  head.add(eyeR.group);
+
+  // ---- brows, driven by the brow channel ----
+  const browMaterial = material(hair, hair, 0.1);
+  const browL = new THREE.Mesh(new THREE.BoxGeometry(0.042, 0.008, 0.012), browMaterial);
+  browL.position.set(-0.050, 0.052, 0.104);
+  head.add(browL);
+  const browR = new THREE.Mesh(new THREE.BoxGeometry(0.042, 0.008, 0.012), browMaterial);
+  browR.position.set(0.050, 0.052, 0.104);
+  head.add(browR);
+
+  // ---- mouth, driven by the mouth and mouth_open channels ----
+  const mouthMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.020, 12, 8),
+    new THREE.MeshBasicMaterial({ color: '#8a2f45' })
+  );
+  mouthMesh.scale.set(1, 0.4, 0.3);
+  mouthMesh.position.set(0, -0.042, 0.100);
+  head.add(mouthMesh);
+  // A lower lip so an open mouth reads as an opening rather than a blob.
+  const lip = new THREE.Mesh(new THREE.SphereGeometry(0.018, 10, 8), material('#e0708a'));
+  lip.scale.set(1, 0.5, 0.3);
+  lip.position.set(0, -0.052, 0.098);
+  head.add(lip);
+
   // Blush, the cheapest way to make a face read as friendly.
-  const blushMaterial = new THREE.MeshBasicMaterial({ color: '#ff9ab5', transparent: true, opacity: 0.5 });
+  const blushMaterial = new THREE.MeshBasicMaterial({ color: '#ff9ab5', transparent: true, opacity: 0.35 });
   const blushL = new THREE.Mesh(new THREE.CircleGeometry(0.022, 10), blushMaterial);
   blushL.position.set(-0.072, -0.026, 0.100); head.add(blushL);
   const blushR = blushL.clone(); blushR.position.x = 0.072; head.add(blushR);
+
+  // Tears and sweat: small drops that appear only when the model says so.
+  const dropMaterial = new THREE.MeshBasicMaterial({ color: '#bfe9ff', transparent: true, opacity: 0.85 });
+  const tearL = new THREE.Mesh(new THREE.SphereGeometry(0.007, 8, 6), dropMaterial);
+  tearL.position.set(-0.048, -0.020, 0.112); head.add(tearL);
+  const tearR = tearL.clone(); tearR.position.x = 0.048; head.add(tearR);
+  const sweatMaterial = new THREE.MeshBasicMaterial({ color: '#dff4ff', transparent: true, opacity: 0.8 });
+  const sweatDrop = new THREE.Mesh(new THREE.SphereGeometry(0.006, 8, 6), sweatMaterial);
+  sweatDrop.position.set(0.090, 0.040, 0.090);
+  head.add(sweatDrop);
 
   // ---- hair: cap, fringe, side locks, twin tails ----
   const hairMaterial = material(hair, hair, 0.12);
@@ -651,6 +702,8 @@ function createFlyVisual(agent) {
     agentId: agent.id, body, head, face, hair, outfit, rig,
     leftWing, rightWing, armL, armR, legL, legR,
     selection, label, puffGroup,
+    eyes: [eyeL, eyeR], brows: [browL, browR], mouth: mouthMesh, lip,
+    blushes: [blushL, blushR], tears: [tearL, tearR], sweatDrop,
   };
   scene.add(group);
   return group;
@@ -710,6 +763,66 @@ function syncScene() {
     ud.rightWing.rotation.x = 0.2 - flutter;
 
     ud.head.rotation.y = Math.sin(performance.now() * 0.0009 + index) * 0.18;
+
+    // ---- face ----
+    // Every channel below comes straight from the model. The rig does not
+    // decide anything, it only shows what the fly is already feeling.
+    const face = agent.face || {};
+    const blink = Math.max(0, Math.min(1, face.blink ?? 0));
+    const gazeX = Math.max(-1, Math.min(1, face.gaze_x ?? 0));
+    const gazeY = Math.max(-1, Math.min(1, face.gaze_y ?? 0));
+    const pupil = Math.max(0.5, Math.min(1.6, face.pupil ?? 1));
+    const brow = Math.max(-1, Math.min(1, face.brow ?? 0));
+    const smile = Math.max(-1, Math.min(1, face.mouth ?? 0));
+    const open = Math.max(0, Math.min(1, face.mouth_open ?? 0));
+
+    // Lids rotate down over the eye. Closed is a full -90 degrees from the
+    // raised position.
+    for (const eye of ud.eyes) {
+      eye.lid.rotation.x = -1.35 + blink * 1.35;
+      // The pupil slides inside the whites, and dilates with fear.
+      const range = 0.012 * (1 - blink);
+      eye.iris.position.x = gazeX * range;
+      eye.iris.position.y = gazeY * range;
+      eye.iris.scale.setScalar(pupil);
+      eye.shine.position.x = gazeX * range - 0.008 * Math.sign(eye.iris.position.x || 1);
+      eye.shine.position.y = gazeY * range + 0.010;
+      eye.shine.visible = blink < 0.7 && pupil > 0.7;
+    }
+    // Brows: raised when the model says so, drawn together when frowning.
+    for (const br of ud.brows) {
+      br.position.y = 0.052 + brow * 0.014;
+      br.rotation.z = brow * 0.35;
+    }
+    // Mouth: a smile curves, a frown inverts, an open mouth drops the jaw.
+    ud.mouth.scale.set(1 + Math.abs(smile) * 0.25, 0.4 + open * 1.6, 0.3);
+    ud.mouth.position.y = -0.042 - open * 0.016;
+    ud.lip.position.y = -0.052 - open * 0.026;
+    ud.lip.scale.set(1 + Math.abs(smile) * 0.2, 0.5, 0.3);
+
+    // Blush, tears and sweat fade with their own channels.
+    for (const b of ud.blushes) {
+      b.material.opacity = 0.15 + (face.blush ?? 0) * 0.7;
+      b.scale.setScalar(0.8 + (face.blush ?? 0) * 0.5);
+    }
+    const wet = face.tears ?? 0;
+    for (const tear of ud.tears) {
+      tear.visible = wet > 0.05;
+      tear.scale.setScalar(0.5 + wet);
+      // Tears slide down the cheek as they build.
+      tear.position.y = -0.020 - wet * 0.016;
+    }
+    const nervous = face.sweat ?? 0;
+    ud.sweatDrop.visible = nervous > 0.05;
+    ud.sweatDrop.scale.setScalar(0.5 + nervous);
+    ud.sweatDrop.position.y = 0.040 - nervous * 0.012;
+
+    // Head tilts with the mood: a raised brow tips the head, a frown drops it.
+    ud.head.rotation.z = -brow * 0.10 + smile * 0.05;
+    ud.head.rotation.x = -open * 0.06;
+
+    // ---- gesture ----
+    applyGesture(ud, agent.social || {}, performance.now() * 0.001);
 
     ud.selection.visible = agent.selected;
     ud.body.material.emissiveIntensity = 0.16 + agent.hormone_level * 1.2;
@@ -812,7 +925,87 @@ function renderBrain(data) {
   $('brain-outcome').textContent = brain.last_outcome;
   drawCurve(brain.curve || []);
   renderLog(data.training.log || [], data.training.log_path);
-  renderGaitAndAffect(agent);
+  // The agent is resolved here rather than assumed: renderBrain only receives
+  // the snapshot, and reaching for an outer `agent` would throw and take the
+  // whole panel down with it.
+  const agent = (data.agents || []).find((item) => item.id === state.selected) || (data.agents || [])[0];
+  if (agent) renderGaitAndAffect(agent);
+}
+
+// ---- gestures --------------------------------------------------------
+/*
+ * Pose the body from the model's gesture channel. Every pose is a blend from
+ * the rest stance, multiplied by the envelope, so a gesture can fade or be
+ * interrupted without leaving the character in a broken pose.
+ */
+const GESTURE_IDS = {
+  'приветствие': 1, 'поклон': 2, 'хлопки': 3, 'указание': 4,
+  'утешение': 5, 'плечики': 6, 'прошу обнять': 7, 'покой': 0,
+};
+
+function applyGesture(ud, social) {
+  const id = GESTURE_IDS[social.gesture];
+  const s = Math.max(0, Math.min(1, social.strength || 0));
+  if (id === undefined || id === 0 || s <= 0.01) {
+    // At rest, ease the arms back to a neutral hang.
+    ud.armL.rotation.x += (0.05 - ud.armL.rotation.x) * 0.2;
+    ud.armR.rotation.x += (0.05 - ud.armR.rotation.x) * 0.2;
+    ud.armL.rotation.z += (0.22 - ud.armL.rotation.z) * 0.2;
+    ud.armR.rotation.z += (-0.22 - ud.armR.rotation.z) * 0.2;
+    ud.rig.rotation.x += (0 - ud.rig.rotation.x) * 0.2;
+    return;
+  }
+  // The phase gives repeatable motion inside the gesture, so a wave moves
+  // rather than merely appearing.
+  const p = social.phase || 0;
+  const swing = Math.sin(p * Math.PI * 4);
+
+  switch (id) {
+    case 1: // wave: one arm raised, oscillating
+      ud.armR.rotation.x = -2.0 * s;
+      ud.armR.rotation.z = -0.22 - 0.3 * swing * s;
+      ud.armL.rotation.x = 0.05;
+      break;
+    case 2: // bow: the whole upper body dips forward
+      ud.rig.rotation.x = 0.6 * s;
+      ud.armL.rotation.x = -0.3 * s;
+      ud.armR.rotation.x = -0.3 * s;
+      break;
+    case 3: { // clap: hands meet in front, twice per gesture
+      const clap = Math.abs(Math.sin(p * Math.PI * 4));
+      ud.armL.rotation.x = -1.3 * s;
+      ud.armR.rotation.x = -1.3 * s;
+      ud.armL.rotation.z = 0.22 + 0.7 * (1 - clap) * s;
+      ud.armR.rotation.z = -0.22 - 0.7 * (1 - clap) * s;
+      break;
+    }
+    case 4: // point: one arm forward, firm
+      ud.armR.rotation.x = -1.5 * s;
+      ud.armR.rotation.z = -0.1;
+      ud.rig.rotation.y = 0.1 * s;
+      break;
+    case 5: // comfort: hands to the chest
+      ud.armL.rotation.x = -1.1 * s;
+      ud.armR.rotation.x = -1.1 * s;
+      ud.armL.rotation.z = 0.22 + 0.5 * s;
+      ud.armR.rotation.z = -0.22 - 0.5 * s;
+      break;
+    case 6: // shrug: arms out, body slightly lifted
+      ud.armL.rotation.z = 0.22 + 0.6 * s;
+      ud.armR.rotation.z = -0.22 - 0.6 * s;
+      ud.armL.rotation.x = -0.2 * s;
+      ud.armR.rotation.x = -0.2 * s;
+      ud.rig.position.y += 0.02 * s;
+      break;
+    case 7: // asking to be held: both arms reach forward and up
+      ud.armL.rotation.x = -1.7 * s;
+      ud.armR.rotation.x = -1.7 * s;
+      ud.armL.rotation.z = 0.22 + 0.15 * s;
+      ud.armR.rotation.z = -0.22 - 0.15 * s;
+      break;
+    default:
+      break;
+  }
 }
 
 // ---- gait and affect -------------------------------------------------
@@ -839,6 +1032,25 @@ function renderGaitAndAffect(agent) {
   $('affect-list').innerHTML = affect.map(([name, value]) =>
     `<span class="affect-row">${escapeHtml(name)}<i style="width:${pct(value)}"></i><b>${Math.round(value * 100)}</b></span>`
   ).join('');
+
+  // Face gauges, straight from the model.
+  const face = agent.face || {};
+  const blinkValue = face.blink ?? 0;
+  $('face-blink').textContent = blinkValue > 0.7 ? 'глаза закрыты' : (blinkValue > 0.2 ? 'моргает' : 'глаза открыты');
+  $('face-blink-meter').style.width = pct(blinkValue);
+  $('face-pupil-meter').style.width = pct(((face.pupil ?? 1) - 0.5) / 1.1);
+  // Brow and mouth run -1..1, so shift them into a 0..1 bar.
+  $('face-brow-meter').style.width = pct(((face.brow ?? 0) + 1) / 2);
+  $('face-mouth-meter').style.width = pct(((face.mouth ?? 0) + 1) / 2);
+  $('face-blush-meter').style.width = pct(face.blush);
+  $('face-tears-meter').style.width = pct(face.tears);
+
+  // Social.
+  const social = agent.social || {};
+  $('social-gesture').textContent = social.gesture || 'покой';
+  $('social-partner').textContent = social.partner ? `с #${social.partner}` : 'одинока';
+  $('social-bond-meter').style.width = pct(social.bond);
+  $('social-last').textContent = social.last_encounter || '—';
 }
 
 // ---- learning curve sparkline ----------------------------------------
@@ -932,6 +1144,21 @@ $('brain-hurt').addEventListener('click', () => { if (state.selected != null) co
 $('brain-dopamine').addEventListener('click', () => { if (state.selected != null) command('hormone', { id: state.selected, name: 'dopamine', value: 0.8 }); });
 $('brain-unlearn').addEventListener('click', () => { if (state.selected != null) command('unlearn', { id: state.selected }); });
 $('walk-burst').addEventListener('click', () => command('walk', { value: 200 }));
+// Social controls. The meet button needs a partner, so it defaults to the
+// nearest other fly.
+$('gesture-cycle').addEventListener('click', () => {
+  if (state.selected == null) return;
+  const order = ['покой', 'приветствие', 'поклон', 'хлопки', 'указание', 'утешение', 'плечики', 'прошу обнять'];
+  const agent = state.data && state.data.agents.find((item) => item.id === state.selected);
+  const current = agent && agent.social ? order.indexOf(agent.social.gesture) : -1;
+  command('gesture', { id: state.selected, value: ((current < 0 ? 0 : current) + 1) % 8 });
+});
+$('meet-button').addEventListener('click', () => {
+  if (state.selected == null || !state.data) return;
+  const other = state.data.agents.find((item) => item.id !== state.selected);
+  if (!other) return;
+  command('meet', { id: state.selected, value: other.id });
+});
 $('gait-cycle').addEventListener('click', () => {
   if (state.selected == null) return;
   const agent = state.data && state.data.agents.find((item) => item.id === state.selected);

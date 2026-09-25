@@ -53,6 +53,44 @@ pub struct GaitSnapshot {
     pub mastery: f32,
 }
 
+/// The face, straight out of the C core. The rig reads this and nothing else.
+#[derive(Debug, Clone, Serialize)]
+pub struct FaceSnapshot {
+    /// 0 open, 1 shut.
+    pub blink: f32,
+    pub gaze_x: f32,
+    pub gaze_y: f32,
+    /// Dilation, 0.5 constricted to 1.6 wide.
+    pub pupil: f32,
+    /// -1 frowning to 1 raised.
+    pub brow: f32,
+    /// -1 frown to 1 smile.
+    pub mouth: f32,
+    pub mouth_open: f32,
+    pub blush: f32,
+    pub tears: f32,
+    pub sweat: f32,
+}
+
+/// What a character is doing with her body, and who she is doing it to.
+#[derive(Debug, Clone, Serialize)]
+pub struct SocialSnapshot {
+    /// Current pose, as a readable name.
+    pub gesture: String,
+    /// Envelope of the pose, 0..1.
+    pub strength: f32,
+    /// Progress through the pose, 0..1.
+    pub phase: f32,
+    /// Depth of the relationship, 0..1.
+    pub bond: f32,
+    /// The last encounter performed, readable.
+    pub last_encounter: String,
+    /// How inclined she is to start one, 0..1.
+    pub drive: f32,
+    /// Id of the fly she last met, if any.
+    pub partner: Option<u32>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentSnapshot {
     pub id: u32,
@@ -87,6 +125,10 @@ pub struct AgentSnapshot {
     pub gait: GaitSnapshot,
     /// Every emotion, not just the dominant one, for the affect display.
     pub affect: Vec<(String, f32)>,
+    /// The face, for the rig.
+    pub face: FaceSnapshot,
+    /// Gesture and relationship state.
+    pub social: SocialSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -319,6 +361,22 @@ impl Agent {
     /// washed out within a few frames and the fly would never actually arrive.
     fn steer_towards(&mut self, target: [f32; 2], _gain: f32, _dt: f32) {
         self.anchor = target;
+    }
+
+    /// Walk toward a point, used when a lonely character goes looking for
+    /// company. This is a short-range nudge, not the act attractor: the act
+    /// still decides where she belongs, and a friend only pulls her briefly.
+    fn walk_toward(&mut self, x: f32, y: f32, dt: f32) {
+        let dx = x - self.position[0];
+        let dy = y - self.position[1];
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance < 1e-3 {
+            return;
+        }
+        // Ease off on approach, so they do not collide and bounce apart.
+        let pull = distance.min(1.0) * dt * 1.4;
+        self.velocity[0] += (dx / distance) * pull;
+        self.velocity[1] += (dy / distance) * pull;
     }
 
     /// Advance the body forward along its current heading, for `n` steps.
@@ -696,6 +754,10 @@ pub struct EditorRuntime {
     /// Optional JSONL sink, so a session can be analysed after the fact.
     log_file: Option<std::fs::File>,
     log_path: Option<std::path::PathBuf>,
+    /// Who each fly last met, for the readout.
+    partners: Vec<Option<u32>>,
+    /// Cadence of the social layer, independent of the training timer.
+    encounter_timer: f32,
 }
 
 /// Per-fly training bookkeeping, on top of the C brain's own weights.
@@ -960,6 +1022,8 @@ impl EditorRuntime {
             log: std::collections::VecDeque::with_capacity(LOG_LEN),
             log_file: None,
             log_path: None,
+            partners: vec![None; count],
+            encounter_timer: 0.0,
         }
     }
 
@@ -992,6 +1056,95 @@ impl EditorRuntime {
         brain.fly.seed(0x5EED + agent_index as u32);
         brain.fly.clear_hormones();
         present_act(&mut brain.fly, act);
+    }
+
+    /// Let characters meet when they are near each other and inclined to.
+    ///
+    /// A pair only meets if they are close, both off cooldown, and at least one
+    /// of them actually wants company. The kind of encounter is chosen from
+    /// the emotional state of both, so a frightened fly and a lonely one do
+    /// the same thing and get different results.
+    fn run_encounters(&mut self, dt: f32) {
+        if self.agents.len() < 2 {
+            return;
+        }
+        for i in 0..self.agents.len() {
+            for j in (i + 1)..self.agents.len() {
+                if !self.brains[i].fly.can_encounter() || !self.brains[j].fly.can_encounter() {
+                    continue;
+                }
+                let (ax, ay) = (self.agents[i].position[0], self.agents[i].position[1]);
+                let (bx, by) = (self.agents[j].position[0], self.agents[j].position[1]);
+                let near = (ax - bx).powi(2) + (ay - by).powi(2) < 1.2;
+                if !near {
+                    // A lonely fly walks toward the nearest other one. This is
+                    // what turns two characters standing apart into a pair that
+                    // keeps running into each other.
+                    let lonely =
+                        self.brains[i].fly.encounter_drive() > self.brains[j].fly.encounter_drive();
+                    if lonely {
+                        self.agents[i].walk_toward(bx, by, dt);
+                    }
+                    continue;
+                }
+                let kind = self.choose_encounter(i, j);
+                // Split the borrow so both distinct brains can be borrowed
+                // mutably at once. The compiler cannot prove `i != j` from the
+                // loop shape, and two simultaneous mutable borrows of one
+                // field are rejected even when they are provably different
+                // elements.
+                let (left, right) = self.brains.split_at_mut(j);
+                let meeting = tfly::meet(&mut left[i].fly, &mut right[0].fly, kind);
+                if meeting.happened {
+                    self.partners[i] = Some(self.agents[j].id);
+                    self.partners[j] = Some(self.agents[i].id);
+                    self.log(LogEntry {
+                        t: 0.0,
+                        fly: self.agents[i].id,
+                        kind: "meet".to_owned(),
+                        text: format!(
+                            "#{} и #{} {}",
+                            self.agents[i].id,
+                            self.agents[j].id,
+                            tfly::Fly::encounter_name(kind)
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Choose an encounter from the emotional state of a pair.
+    fn choose_encounter(&self, i: usize, j: usize) -> i32 {
+        use tfly::emotion as emo;
+        use tfly::encounter as enc;
+        let a = &self.brains[i].fly;
+        let b = &self.brains[j].fly;
+        let fear = a.fear_level() + b.fear_level();
+        let anger = a.emotion_level(emo::ANGER) + b.emotion_level(emo::ANGER);
+        let sad = a.emotion_level(emo::SADNESS) + b.emotion_level(emo::SADNESS);
+        let joy = a.emotion_level(emo::JOY) + b.emotion_level(emo::JOY);
+        let trust = a.emotion_level(emo::TRUST) + b.emotion_level(emo::TRUST);
+        let curious = a.emotion_level(emo::CURIOSITY) + b.emotion_level(emo::CURIOSITY);
+
+        // An encounter is a conversation, so the loudest emotion wins and the
+        // rest break the tie. That is what makes two flies do different things
+        // to each other even when they are the same species.
+        if fear > 1.0 {
+            enc::COMFORT
+        } else if anger > 0.5 {
+            enc::ARGUE
+        } else if sad > 0.6 {
+            enc::COMFORT
+        } else if trust > 1.0 {
+            enc::SHARE
+        } else if joy > 0.8 {
+            enc::HIGH_FIVE
+        } else if curious > 0.8 {
+            enc::GREET
+        } else {
+            enc::BOW
+        }
     }
 
     /// Run one training trial for every fly, on the act each fly is in.
@@ -1094,6 +1247,61 @@ impl EditorRuntime {
     fn gait_weight_for(&self, id: u32, gait: usize) -> f32 {
         self.brain_of(id)
             .map_or(0.0, |brain| brain.fly.gait_weight(gait as i32))
+    }
+
+    /// The face, straight from the brain.
+    fn face_for(&self, id: u32) -> FaceSnapshot {
+        let Some(brain) = self.brain_of(id) else {
+            return FaceSnapshot {
+                blink: 0.0,
+                gaze_x: 0.0,
+                gaze_y: 0.0,
+                pupil: 1.0,
+                brow: 0.0,
+                mouth: 0.0,
+                mouth_open: 0.0,
+                blush: 0.0,
+                tears: 0.0,
+                sweat: 0.0,
+            };
+        };
+        FaceSnapshot {
+            blink: brain.fly.blink(),
+            gaze_x: brain.fly.gaze_x(),
+            gaze_y: brain.fly.gaze_y(),
+            pupil: brain.fly.pupil(),
+            brow: brain.fly.brow(),
+            mouth: brain.fly.mouth(),
+            mouth_open: brain.fly.mouth_open(),
+            blush: brain.fly.blush(),
+            tears: brain.fly.tears(),
+            sweat: brain.fly.sweat(),
+        }
+    }
+
+    /// Gesture and relationship state.
+    fn social_for(&self, id: u32) -> SocialSnapshot {
+        let Some(brain) = self.brain_of(id) else {
+            return SocialSnapshot {
+                gesture: "покой".to_owned(),
+                strength: 0.0,
+                phase: 0.0,
+                bond: 0.0,
+                last_encounter: String::new(),
+                drive: 0.0,
+                partner: None,
+            };
+        };
+        let index = self.agents.iter().position(|agent| agent.id == id);
+        SocialSnapshot {
+            gesture: tfly::Fly::gesture_name(brain.fly.gesture()).to_owned(),
+            strength: brain.fly.gesture_strength(),
+            phase: brain.fly.gesture_phase(),
+            bond: brain.fly.bond(),
+            last_encounter: tfly::Fly::encounter_name(brain.fly.last_encounter()).to_owned(),
+            drive: brain.fly.encounter_drive(),
+            partner: index.and_then(|i| self.partners.get(i).copied().flatten()),
+        }
     }
 
     /// Every emotion for a fly, as Russian-labelled pairs, strongest first.
@@ -1263,6 +1471,14 @@ impl EditorRuntime {
                 }
             }
         }
+
+        // Encounters run on their own cadence, independent of the training
+        // timer, so characters keep meeting even when training is paused.
+        self.encounter_timer += dt * self.speed;
+        if self.encounter_timer >= 0.9 {
+            self.encounter_timer = 0.0;
+            self.run_encounters(dt);
+        }
     }
 
     pub fn snapshot(&self, fps: f32) -> EditorSnapshot {
@@ -1324,6 +1540,8 @@ impl EditorRuntime {
                         mastery,
                     },
                     affect,
+                    face: self.face_for(agent.id),
+                    social: self.social_for(agent.id),
                 }
             })
             .collect();
@@ -1633,6 +1851,66 @@ impl EditorRuntime {
                     self.agents[index].gait_sway = brain.fly.gait_sway();
                 }
             }
+            // Make two flies meet on demand, whatever their feelings say.
+            "meet" => {
+                let first = command.id.context("meet requires the first fly id")?;
+                let second = command.value.map(|v| v as u32);
+                let a = self.agents.iter().position(|agent| agent.id == first);
+                let b = match second {
+                    Some(id) => self.agents.iter().position(|agent| agent.id == id),
+                    None => self
+                        .agents
+                        .iter()
+                        .enumerate()
+                        .find(|(i, agent)| agent.id != first && self.brains[*i].fly.can_encounter())
+                        .map(|(i, _)| i),
+                };
+                if let (Some(a), Some(b)) = (a, b) {
+                    let kind = self.choose_encounter(a, b);
+                    // Split the borrow so both distinct brains are mutable.
+                    let (left, right) = self.brains.split_at_mut(b);
+                    let meeting = tfly::meet(&mut left[a].fly, &mut right[0].fly, kind);
+                    if meeting.happened {
+                        self.partners[a] = Some(self.agents[b].id);
+                        self.partners[b] = Some(self.agents[a].id);
+                        self.log(LogEntry {
+                            t: 0.0,
+                            fly: self.agents[a].id,
+                            kind: "meet".to_owned(),
+                            text: format!(
+                                "#{} и #{} {}",
+                                self.agents[a].id,
+                                self.agents[b].id,
+                                tfly::Fly::encounter_name(kind)
+                            ),
+                        });
+                    } else {
+                        self.log(LogEntry {
+                            t: 0.0,
+                            fly: self.agents[a].id,
+                            kind: "meet".to_owned(),
+                            text: "не сейчас, кулдаун".to_owned(),
+                        });
+                    }
+                }
+            }
+            // Make a character play a pose by hand.
+            "gesture" => {
+                let id = command.id.context("gesture requires id")?;
+                let which = command.value.unwrap_or(1.0).clamp(0.0, 7.0) as i32;
+                if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                    // Forced, because this is a button press: silently dropping
+                    // the request because a previous pose is still finishing
+                    // would look like a broken control.
+                    self.brains[index].fly.force_gesture(which);
+                    self.log(LogEntry {
+                        t: 0.0,
+                        fly: id,
+                        kind: "gesture".to_owned(),
+                        text: tfly::Fly::gesture_name(which).to_owned(),
+                    });
+                }
+            }
             // Start or stop mirroring events to a JSONL file.
             "logfile" => {
                 let path = command.name.clone();
@@ -1699,7 +1977,7 @@ impl EditorRuntime {
 
 fn response(status: &str, content_type: &str, body: &str) -> Vec<u8> {
     format!(
-        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: keep-alive\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store, must-revalidate\r\nPragma: no-cache\r\nConnection: keep-alive\r\n\r\n{body}",
         body.len()
     )
     .into_bytes()
@@ -2328,6 +2606,74 @@ mod tests {
         }
         assert_eq!(agent.gait.weights.len(), GAIT_NAMES.len());
         assert!(agent.gait.steps > 0);
+    }
+
+    #[test]
+    fn characters_meet_and_build_bonds() {
+        let mut runtime = EditorRuntime::new(3);
+        // Put them all at the same act so they end up close together.
+        runtime
+            .apply_command(br#"{"action":"act","name":"main_stage"}"#)
+            .expect("act");
+        // Run long enough for the social layer to fire repeatedly.
+        for _ in 0..4000 {
+            runtime.step(FIXED_DT);
+        }
+        let bonds: Vec<f32> = runtime
+            .brains
+            .iter()
+            .map(|brain| brain.fly.bond())
+            .collect();
+        assert!(
+            bonds.iter().any(|b| *b > 0.0),
+            "characters that keep meeting must form a bond: {bonds:?}"
+        );
+        // A partner must have been recorded.
+        assert!(
+            runtime.partners.iter().any(|p| p.is_some()),
+            "the pair must be tracked as partners"
+        );
+        // And the meeting must be in the log.
+        assert!(
+            runtime.log.iter().any(|e| e.kind == "meet"),
+            "meetings must be logged"
+        );
+    }
+
+    #[test]
+    fn a_wounded_character_meets_more_cautiously() {
+        let mut runtime = EditorRuntime::new(2);
+        runtime
+            .apply_command(br#"{"action":"act","name":"main_stage"}"#)
+            .expect("act");
+        for _ in 0..2000 {
+            runtime.step(FIXED_DT);
+        }
+        let calm_drive = runtime.brains[0].fly.encounter_drive();
+        // Pain and fear should suppress the urge to socialise.
+        runtime
+            .apply_command(br#"{"action":"hurt","id":1,"value":0.9}"#)
+            .expect("hurt");
+        runtime.brains[0].fly.steps(30, FIXED_DT);
+        let hurt_drive = runtime.brains[0].fly.encounter_drive();
+        assert!(
+            hurt_drive < calm_drive,
+            "a frightened fly must want company less: calm={calm_drive} hurt={hurt_drive}"
+        );
+    }
+
+    #[test]
+    fn the_snapshot_carries_the_face() {
+        let mut runtime = EditorRuntime::new(1);
+        for _ in 0..300 {
+            runtime.step(FIXED_DT);
+        }
+        let agent = &runtime.snapshot(60.0).agents[0];
+        assert!((0.0..=1.0).contains(&agent.face.blink));
+        assert!((-1.0..=1.0).contains(&agent.face.gaze_x));
+        assert!((0.5..=1.6).contains(&agent.face.pupil));
+        assert!((-1.0..=1.0).contains(&agent.face.mouth));
+        assert!(!agent.social.gesture.is_empty());
     }
 
     #[test]

@@ -536,7 +536,238 @@ static void test_scenario_nociception(void) {
     check(TLearningGate(&fly) > 0.5f, "reward reopens the learning gate");
 }
 
-/* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ *
+ * The face. Every channel is derived from state, so the test drives the
+ * state through real stimuli and checks the face follows. A face that only
+ * responded to a direct setter would not be tied to anything.
+ * ------------------------------------------------------------------ */
+static void test_face(void) {
+    printf("face\n");
+    TFLY fly;
+    TNew(&fly);
+    TSeed(&fly, 11);
+
+    /* A newborn is awake and looking at you. */
+    check(fly.blink < 0.2f, "a newborn has her eyes open");
+    check(fly.pupil > 0.5f, "a newborn has visible pupils");
+    check(fabsf(fly.mouth) < 0.1f, "a newborn has a neutral mouth");
+
+    /* Sleep closes the eyes on its own, with no timer involved. */
+    TSleep(&fly);
+    for (int i = 0; i < 120; i++) TSteps(&fly, 1, 1.0f / 60.0f);
+    check(fly.blink > 0.8f, "sleep closes the eyes");
+    TWake(&fly);
+
+    /* Blinking is a pulse: the lids shut and open again, repeatedly. Count
+     * the front of each closed interval rather than watching for a falling
+     * edge, because the lids open faster than any single step can sample. */
+    int blinks = 0;
+    int closed = 0;
+    for (int i = 0; i < 60 * 30; i++) {
+        TSteps(&fly, 1, 1.0f / 60.0f);
+        int shut = fly.blink > 0.5f;
+        if (shut && !closed) blinks++;
+        closed = shut;
+    }
+    check(blinks > 3, "a wakeful fly blinks repeatedly");
+
+    /* Fear dilates the pupils relative to calm. Both flies see identical
+     * inputs apart from the predator, so the difference is the predator. */
+    TFLY calm, scared;
+    TNew(&calm);
+    TNew(&scared);
+    TSeed(&calm, 7);
+    TSeed(&scared, 7);
+    for (int i = 0; i < 600; i++) {
+        TSteps(&calm, 1, 1.0f / 60.0f);
+        if (i % 20 == 0) TPredatorSignal(&scared, 0.8f);
+        TSteps(&scared, 1, 1.0f / 60.0f);
+    }
+    check(scared.pupil > calm.pupil, "fear dilates the pupils");
+    check(scared.brow > calm.brow, "fear raises the brows");
+    check(scared.mouth < calm.mouth, "fear pulls the mouth down");
+
+    /* Reward smiles. */
+    TFLY happy;
+    TNew(&happy);
+    TSeed(&happy, 3);
+    for (int i = 0; i < 300; i++) {
+        TReward(&happy, 0.9f);
+        TSteps(&happy, 1, 1.0f / 60.0f);
+    }
+    check(happy.mouth > 0.0f, "reward smiles");
+    check(happy.blush > 0.0f, "reward brings colour to the face");
+
+    /* Tears are a reservoir, not a mirror. Sadness fades long before the wet
+     * on the cheeks does, so a character can still be crying after she has
+     * stopped being sad. Punishment is used rather than a direct affect
+     * injection, because that is the stimulus a fly would actually meet. */
+    TFLY wet;
+    TNew(&wet);
+    TSeed(&wet, 5);
+    TPunish(&wet, 0.9f);
+    for (int i = 0; i < 600; i++) TSteps(&wet, 1, 1.0f / 60.0f);
+    check(wet.tears > 0.1f, "sadness produces tears");
+    check(wet.tears < 0.9f, "tears stay under the ceiling");
+    check(wet.emotion[T_EMO_SADNESS] < 0.6f, "the sadness that made them has faded");
+    check(wet.tears > wet.emotion[T_EMO_SADNESS] * 0.5f, "tears lag the sadness that made them");
+    float peak = wet.tears;
+    for (int i = 0; i < 1800; i++) {
+        TReward(&wet, 0.9f);
+        TSteps(&wet, 1, 1.0f / 60.0f);
+    }
+    check(wet.tears < peak, "tears dry once she is happy again");
+
+    /* Gaze stays in range and drifts on its own when nothing holds it. */
+    float swing = 0.0f;
+    float first = fly.gaze_x;
+    for (int i = 0; i < 600; i++) {
+        TSteps(&fly, 1, 1.0f / 60.0f);
+        swing += fabsf(fly.gaze_x - first);
+    }
+    check(swing > 0.5f, "the gaze drifts when nothing holds it");
+    check(fly.gaze_x >= -1.0f && fly.gaze_x <= 1.0f, "gaze_x stays in range");
+    check(fly.gaze_y >= -1.0f && fly.gaze_y <= 1.0f, "gaze_y stays in range");
+
+    /* A face must survive being driven hard. */
+    TFLY chaos;
+    TNew(&chaos);
+    TSeed(&chaos, 99);
+    for (int i = 0; i < 20000; i++) {
+        TRand(&chaos);
+        TReward(&chaos, TRand(&chaos));
+        TPunish(&chaos, TRand(&chaos));
+        TPredatorSignal(&chaos, TRand(&chaos));
+        TSleep(&chaos);
+        TWake(&chaos);
+        TSteps(&chaos, 1, 1.0f / 60.0f);
+    }
+    check(chaos.blink >= 0.0f && chaos.blink <= 1.0f, "blink survives chaos");
+    check(chaos.pupil >= 0.5f && chaos.pupil <= 1.6f, "pupil survives chaos");
+    check(chaos.brow >= -1.0f && chaos.brow <= 1.0f, "brow survives chaos");
+    check(chaos.mouth >= -1.0f && chaos.mouth <= 1.0f, "mouth survives chaos");
+    check(chaos.tears >= 0.0f && chaos.tears <= 1.0f, "tears survive chaos");
+    check(chaos.blush >= 0.0f && chaos.blush <= 1.0f, "blush survives chaos");
+    check(chaos.sweat >= 0.0f && chaos.sweat <= 1.0f, "sweat survives chaos");
+    check(chaos.blink == chaos.blink, "no NaN in blink");
+}
+
+/* ------------------------------------------------------------------ *
+ * Encounters. The point of this test is symmetry: a relationship that
+ * only moved one side would not be a relationship.
+ * ------------------------------------------------------------------ */
+static void test_encounters(void) {
+    printf("gestures and encounters\n");
+    TFLY a, b;
+    TNew(&a);
+    TNew(&b);
+    TSeed(&a, 21);
+    TSeed(&b, 22);
+
+    check(TCanEncounter(&a), "a fresh fly has no cooldown");
+    check(TEncounter(&a, &b, T_ENC_GREET) == 1, "a greeting can run");
+    check(a.bond > 0.0f && b.bond > 0.0f, "a greeting deepens both bonds");
+    check(fabsf(a.bond - b.bond) < 0.02f, "the bond grows on both sides alike");
+
+    /* The cooldown has to actually stop a repeat, and a refused meeting must
+     * leave both flies exactly as they were. */
+    check(!TCanEncounter(&a) && !TCanEncounter(&b), "an encounter starts a cooldown");
+    float held = a.bond;
+    float joy = a.emotion[T_EMO_JOY];
+    check(TEncounter(&a, &b, T_ENC_SHARE) == 0, "a second meeting is refused");
+    check(a.bond == held, "a refused meeting does not move the bond");
+    check(a.emotion[T_EMO_JOY] == joy, "a refused meeting does not move affect");
+
+    /* The cooldown has to expire, or the social layer dies after one hello. */
+    for (int i = 0; i < 900; i++) {
+        TSteps(&a, 1, 1.0f / 60.0f);
+        TSteps(&b, 1, 1.0f / 60.0f);
+    }
+    check(TCanEncounter(&a), "the cooldown expires");
+
+    /* Sharing builds a bond faster than a single greeting would. */
+    TFLY c, d;
+    TNew(&c);
+    TNew(&d);
+    TSeed(&c, 31);
+    TSeed(&d, 32);
+    for (int round = 0; round < 4; round++) {
+        TEncounter(&c, &d, T_ENC_SHARE);
+        for (int i = 0; i < 400; i++) {
+            TSteps(&c, 1, 1.0f / 60.0f);
+            TSteps(&d, 1, 1.0f / 60.0f);
+        }
+    }
+    check(c.bond > 0.2f, "sharing builds a real bond");
+
+    /* A quarrel must break it. */
+    float close = c.bond;
+    TEncounter(&c, &d, T_ENC_ARGUE);
+    check(c.bond < close, "a quarrel breaks the bond");
+    check(d.emotion[T_EMO_ANGER] > 0.0f, "a quarrel makes both angry");
+    check(d.bond < close, "a quarrel breaks both bonds, not one");
+
+    /* Fear is a hard brake. A badly frightened fly must not go looking for
+     * company, which is the whole reason the term exists. */
+    TFLY timid, bold;
+    TNew(&timid);
+    TNew(&bold);
+    TSeed(&timid, 41);
+    TSeed(&bold, 41);
+    for (int i = 0; i < 600; i++) {
+        TSteps(&timid, 1, 1.0f / 60.0f);
+        TSteps(&bold, 1, 1.0f / 60.0f);
+    }
+    float want_before = TEncounterDrive(&bold);
+    for (int i = 0; i < 60; i++) {
+        TPredatorSignal(&timid, 0.9f);
+        TSteps(&timid, 1, 1.0f / 60.0f);
+    }
+    check(TEncounterDrive(&timid) < want_before, "fear suppresses the urge to meet");
+
+    /* A gesture runs its course and releases. */
+    TFLY gest;
+    TNew(&gest);
+    TSeed(&gest, 51);
+    check(gest.gesture == T_GES_IDLE, "a fly starts at rest");
+    TGesture(&gest, T_GES_WAVE);
+    check(gest.gesture == T_GES_WAVE, "a gesture can be started");
+    for (int i = 0; i < 40; i++) TSteps(&gest, 1, 1.0f / 60.0f);
+    check(gest.gesture_strength > 0.5f, "a gesture builds");
+    check(gest.gesture_phase > 0.0f && gest.gesture_phase < 1.0f, "a gesture advances");
+    for (int i = 0; i < 120; i++) TSteps(&gest, 1, 1.0f / 60.0f);
+    check(gest.gesture == T_GES_IDLE, "a gesture releases back to rest");
+    check(gest.gesture_strength < 0.01f, "a released gesture is fully out");
+
+    /* An automatic gesture does not cut off one already in progress, but a
+     * direct request does. */
+    TGesture(&gest, T_GES_BOW);
+    for (int i = 0; i < 40; i++) TSteps(&gest, 1, 1.0f / 60.0f);
+    TGesture(&gest, T_GES_WAVE);
+    check(gest.gesture == T_GES_BOW, "an automatic gesture does not interrupt a full one");
+    TGestureForce(&gest, T_GES_WAVE);
+    check(gest.gesture == T_GES_WAVE, "a direct gesture does interrupt it");
+
+    /* Null handles must be safe: a caller can always be wrong. */
+    TGesture(NULL, T_GES_WAVE);
+    TGestureForce(NULL, T_GES_WAVE);
+    check(TEncounter(NULL, &b, T_ENC_GREET) == 0, "a null fly cannot meet");
+    check(TEncounter(&a, NULL, T_ENC_GREET) == 0, "a null fly cannot be met");
+    check(TCanEncounter(NULL) == 0, "a null fly is never ready");
+    check(TEncounterDrive(NULL) == 0.0f, "a null fly never wants company");
+
+    /* Names must resolve for every id, including out of range ones, because
+     * the rig looks them up by number. */
+    for (int i = 0; i < TFLY_N_GESTURE; i++) {
+        check(TFlyGestureName(i) != NULL && TFlyGestureName(i)[0] != '\0', "a gesture has a name");
+    }
+    for (int i = 0; i < TFLY_N_ENCOUNTER; i++) {
+        check(TFlyEncounterName(i) != NULL && TFlyEncounterName(i)[0] != '\0',
+              "an encounter has a name");
+    }
+    check(TFlyGestureName(-5) != NULL, "an out of range gesture still has a name");
+    check(TFlyEncounterName(99) != NULL, "an out of range encounter still has a name");
+}
 
 int main(void) {
     printf("TFLY.h v%d.%d self test\n\n", TFLY_VERSION_MAJOR, TFLY_VERSION_MINOR);
@@ -554,6 +785,8 @@ int main(void) {
     test_determinism();
     test_robustness();
     test_scenario_nociception();
+    test_face();
+    test_encounters();
 
     printf("\n");
     if (failures == 0) {
@@ -563,3 +796,4 @@ int main(void) {
     printf("%d check(s) failed\n", failures);
     return 1;
 }
+

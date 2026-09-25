@@ -67,6 +67,12 @@ extern "C" {
 #define TFLY_N_PULSE 8
 /* Gait presets a fly can learn to walk with. */
 #define TFLY_N_GAIT 4
+/* Named gestures the rig can pose. */
+#define TFLY_N_GESTURE 8
+/* Kinds of encounter between two flies. */
+#define TFLY_N_ENCOUNTER 7
+/* How long a gesture takes, in seconds. */
+#define GESTURE_SECONDS 1.2f
 
 /* ------------------------------------------------------------------ *
  * Sensory channels
@@ -236,6 +242,31 @@ enum {
 /* Odour identities accepted by TOdor(). */
 enum { T_ODOR_FRUIT = 0, T_ODOR_FLOWER, T_ODOR_FEMALE, T_ODOR_MALE, T_ODOR_PREDATOR, T_ODOR_DECAY };
 
+/* Gestures. The rig poses these; the model decides which one runs. */
+enum {
+    T_GES_IDLE = 0,
+    T_GES_WAVE,      /* greeting */
+    T_GES_BOW,       /* respect, apology */
+    T_GES_CLAP,      /* applause, celebration */
+    T_GES_POINT,     /* attention, direction */
+    T_GES_COVER,     /* comfort, hands to chest */
+    T_GES_SHRUG,     /* uncertainty */
+    T_GES_HOLD,      /* reaching out, asking to be held */
+    T_GES_END
+};
+
+/* Encounters. Each has a symmetric effect on the bond between two flies. */
+enum {
+    T_ENC_GREET = 0,
+    T_ENC_BOW,
+    T_ENC_HIGH_FIVE,
+    T_ENC_COMFORT,
+    T_ENC_SHARE,
+    T_ENC_ARGUE,
+    T_ENC_IGNORE,
+    T_ENC_END
+};
+
 /* ------------------------------------------------------------------ *
  * The fly
  * ------------------------------------------------------------------ */
@@ -292,6 +323,30 @@ typedef struct {
     float steps;         /* lifetime step count */
     float balance;       /* 1 stable, 0 falling over */
     unsigned gait_weight[TFLY_N_GAIT];
+
+    /* ---- face ----
+     * The rig reads these and nothing else. Keeping them in the model means
+     * blinking, gaze and expression are consequences of the fly's state
+     * rather than decoration painted over it. */
+    float blink;      /* 1 fully closed, 0 wide open */
+    float blink_rate; /* urgency of the next blink */
+    float gaze_x;     /* -1 left .. 1 right */
+    float gaze_y;     /* -1 down .. 1 up */
+    float pupil;      /* dilation, 0.5 constricted .. 1.6 wide */
+    float brow;       /* -1 frowning .. 1 raised */
+    float mouth;      /* -1 frown .. 1 smile */
+    float mouth_open; /* 0 closed, 1 wide open */
+    float blush;      /* 0..1 */
+    float tears;      /* 0..1, builds while sad */
+    float sweat;      /* 0..1, builds while nervous */
+
+    /* ---- gesture and bond ---- */
+    int gesture;            /* current T_GES_* */
+    float gesture_strength; /* 0..1 envelope */
+    float gesture_phase;    /* 0..1 progress through the gesture */
+    float bond;             /* depth of the relationship, 0..1 */
+    float encounter_cool;   /* seconds until another encounter is allowed */
+    int last_encounter;     /* last T_ENC_* performed */
 
     /* physiology */
     float energy;     /* 0..1 */
@@ -374,6 +429,9 @@ static inline float TApproach(float cur, float target, float rate) {
     return cur + (target - cur) * TClamp(rate, 0.0f, 1.0f);
 }
 
+static inline float TMax(float a, float b) { return a > b ? a : b; }
+static inline float TMin(float a, float b) { return a < b ? a : b; }
+
 static inline int TClampIdx(int v, int n) { return v < 0 ? 0 : (v >= n ? n - 1 : v); }
 
 /* ------------------------------------------------------------------ *
@@ -408,6 +466,12 @@ static inline void TNew(TFLY *fly) {
     fly->gait_sway = 0.4f;
     fly->gait_approach = 0.0f;
     fly->balance = 1.0f;
+    /* A newborn starts with open eyes, a neutral face, and no attachments. */
+    fly->pupil = 0.8f;
+    fly->blink = 0.0f;
+    fly->blink_rate = 0.5f;
+    fly->gesture = T_GES_IDLE;
+    fly->last_encounter = T_ENC_IGNORE;
     TResetLearning(fly);
 }
 
@@ -1366,6 +1430,117 @@ static inline void TUpdate(TFLY *fly, float dt) {
     fly->temp_body = TExp(fly->temp_body, 0.5f + 0.2f * fly->out_thrust, 10.0f, dt);
     fly->lifespan = TClamp(1.0f - fly->age / 86400.0f, 0.0f, 1.0f);
 
+    /* ---- encounter cooldown ----
+     * This has to be discharged here, or a fly that has ever met another one
+     * can never meet anyone again and the social layer silently switches off
+     * after the first greeting. */
+    fly->encounter_cool = TMax(0.0f, fly->encounter_cool - dt);
+
+    /* ---- the face ----
+     * Every channel here is derived from the fly's own state, so the rig never
+     * has to invent an expression. Eyes first, because a character looks at
+     * you before it reacts to you.
+     *
+     * Blinking is not a timer. Drowsiness closes the lids on its own, pain
+     * forces them shut, and surprise suppresses the blink entirely. */
+    {
+        /* Re-derive the handful of affect scalars this block needs. They are
+         * cheap to recompute and it keeps the face block self-contained. */
+        float face_pain = 0.0f;
+        for (int r = 0; r < TFLY_N_REGION; r++) face_pain += fly->pain[r];
+        face_pain = TClamp(face_pain, 0.0f, 1.0f);
+        float face_fear = TClamp(fly->emotion[T_EMO_FEAR] + fly->emotion[T_EMO_DREAD], 0.0f, 1.0f);
+        float face_joy = fly->emotion[T_EMO_JOY] + fly->emotion[T_EMO_CONTENTMENT];
+        float face_anger = fly->emotion[T_EMO_ANGER];
+        float drowsy = 1.0f - fly->energy;
+        float want_rate = 0.35f + 0.5f * drowsy - 0.25f * (face_fear + fly->emotion[T_EMO_SURPRISE]);
+        fly->blink_rate = TClamp(want_rate, 0.05f, 1.5f);
+        if (fly->asleep) {
+            fly->blink = TExp(fly->blink, 1.0f, 0.1f, dt);
+        } else {
+            float period = 2.6f / fly->blink_rate;
+            float in_cycle = fmodf(fly->age, period) / period;
+            float closed = (in_cycle < 0.15f) ? 1.0f : 0.0f;
+            /* Surprise holds the lids open rather than letting them blink. */
+            if (fly->emotion[T_EMO_SURPRISE] > 0.6f) closed = 0.0f;
+            fly->blink = TExp(fly->blink, closed, 0.05f, dt);
+        }
+        if (face_pain > 0.5f) fly->blink = TClamp(fly->blink + 0.4f, 0.0f, 1.0f);
+
+        /* Gaze: a mate, a rival, a threat, or a drift when nothing matters. */
+        float gaze_want_x = 0.0f;
+        float gaze_want_y = 0.0f;
+        if (fly->mate_quality > 0.05f) gaze_want_x = fly->mate_quality * 0.5f;
+        if (fly->rival_pressure > 0.05f) gaze_want_x += fly->rival_pressure * 0.4f;
+        if (fly->predator_risk > 0.05f) {
+            gaze_want_x -= fly->predator_risk * 0.4f;
+            gaze_want_y += fly->predator_risk * 0.5f;
+        }
+        if (fabsf(gaze_want_x) < 0.05f && fabsf(gaze_want_y) < 0.05f) {
+            gaze_want_x = 0.25f * sinf(fly->age * 0.7f);
+            gaze_want_y = 0.15f * sinf(fly->age * 0.43f + 1.0f);
+        }
+        /* A closing lid drags the gaze down with it. */
+        gaze_want_y -= fly->blink * 0.3f;
+        fly->gaze_x = TExp(fly->gaze_x, TClamp(gaze_want_x, -1.0f, 1.0f), 0.35f, dt);
+        fly->gaze_y = TExp(fly->gaze_y, TClamp(gaze_want_y, -1.0f, 1.0f), 0.35f, dt);
+
+        /* Pupils: face_fear dilates, contentment and sleep constrict. */
+        float pupil_want = 0.75f + 0.55f * (face_fear + fly->emotion[T_EMO_SURPRISE]) -
+                           0.30f * (fly->emotion[T_EMO_CONTENTMENT] + 0.5f * drowsy);
+        fly->pupil = TExp(fly->pupil, TClamp(pupil_want, 0.5f, 1.6f), 0.4f, dt);
+
+        /* Brows: up in alarm, down in face_anger and grief. */
+        float brow_want = 0.6f * fly->emotion[T_EMO_SURPRISE] + 0.5f * face_fear -
+                          0.6f * face_anger - 0.4f * fly->emotion[T_EMO_SADNESS] -
+                          0.3f * fly->emotion[T_EMO_CONFUSION];
+        fly->brow = TExp(fly->brow, TClamp(brow_want, -1.0f, 1.0f), 0.25f, dt);
+
+        /* The smile is the clearest single readout of mood. */
+        float smile = 0.7f * (face_joy + fly->emotion[T_EMO_AFFECTION] + fly->emotion[T_EMO_HOPE]) -
+                      0.8f * (face_fear + fly->emotion[T_EMO_PAIN] + fly->emotion[T_EMO_DISAPPOINTMENT]) -
+                      0.4f * face_anger;
+        fly->mouth = TExp(fly->mouth, TClamp(smile, -1.0f, 1.0f), 0.3f, dt);
+        float open_want = 0.7f * fly->emotion[T_EMO_SURPRISE] + 0.4f * drowsy +
+                          0.5f * fly->emotion[T_EMO_EXCITEMENT] + 0.6f * face_pain;
+        fly->mouth_open = TExp(fly->mouth_open, TClamp(open_want, 0.0f, 1.0f), 0.2f, dt);
+
+        float blush_want = 0.8f * (fly->emotion[T_EMO_SHYNESS] + fly->emotion[T_EMO_AFFECTION] +
+                                    fly->emotion[T_EMO_EXCITEMENT]);
+        fly->blush = TExp(fly->blush, TClamp(blush_want, 0.0f, 1.0f), 2.0f, dt);
+        /* Tears are a wetness reservoir, not a mirror of sadness. Sadness
+         * comes and goes quickly; tears lag behind it and then dry slowly, so
+         * a character can still be crying after she has stopped being sad. The
+         * gain has to clear the drying term, or a fly who is briefly sad never
+         * actually sheds a tear. */
+        float tear_gain = fly->emotion[T_EMO_SADNESS] * 0.35f;
+        float tear_dry =
+            0.03f + 0.22f * face_joy + 0.10f * fly->emotion[T_EMO_CONTENTMENT];
+        /* The ceiling is below 1.0 on purpose: a face streaming at maximum
+         * while smiling reads as a rendering fault rather than as sadness. */
+        float tears = fly->tears + (tear_gain - tear_dry) * dt;
+        fly->tears = TClamp(tears, 0.0f, 0.85f);
+        /* Sweat tracks nerves: stress plus awkwardness. */
+        float sweat_rate = (fly->stress * 0.4f + fly->emotion[T_EMO_SHYNESS] * 0.5f) - 0.03f;
+        fly->sweat = TClamp(fly->sweat + sweat_rate * dt, 0.0f, 1.0f);
+    }
+
+    /* ---- gesture envelope ----
+     * A gesture runs for a fixed time with a soft start and end, so the rig
+     * can pose from `gesture_phase` without easing the strength itself. */
+    if (fly->gesture != T_GES_IDLE) {
+        fly->gesture_phase += dt / GESTURE_SECONDS;
+        if (fly->gesture_phase >= 1.0f) {
+            fly->gesture_phase = 0.0f;
+            fly->gesture = T_GES_IDLE;
+            fly->gesture_strength = 0.0f;
+        } else {
+            fly->gesture_strength = 0.5f - 0.5f * cosf(6.2831853f * fly->gesture_phase);
+        }
+    } else {
+        fly->gesture_strength = TExp(fly->gesture_strength, 0.0f, 0.1f, dt);
+    }
+
     /* ---- sleep gating ----
      * Sleep pressure has to fall while the fly sleeps, otherwise the state
      * is absorbing: once asleep the fly can never build up the reason to
@@ -1609,6 +1784,166 @@ static inline const char *TFlySensoryName(int s) {
         case T_SMELL_ANTENNA: return "antenna";
         default: return "wind";
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * Gestures and encounters
+ *
+ * A gesture is a pose the rig reads; an encounter is what two flies do to
+ * each other. Encounters are symmetric and have real consequences: they move
+ * the bond in both directions and change both flies' affect. That is the
+ * whole difference between two characters standing near each other and two
+ * characters who know each other.
+ * ------------------------------------------------------------------ */
+
+static inline const char *TFlyGestureName(int g) {
+    switch (TClampIdx(g, TFLY_N_GESTURE)) {
+        case T_GES_WAVE: return "приветствие";
+        case T_GES_BOW: return "поклон";
+        case T_GES_CLAP: return "хлопки";
+        case T_GES_POINT: return "указание";
+        case T_GES_COVER: return "утешение";
+        case T_GES_SHRUG: return "плечики";
+        case T_GES_HOLD: return "прошу обнять";
+        default: return "покой";
+    }
+}
+
+static inline const char *TFlyEncounterName(int e) {
+    switch (TClampIdx(e, TFLY_N_ENCOUNTER)) {
+        case T_ENC_GREET: return "поздоровались";
+        case T_ENC_BOW: return "поклонились";
+        case T_ENC_HIGH_FIVE: return "похлопали ладони";
+        case T_ENC_COMFORT: return "утешили";
+        case T_ENC_SHARE: return "поделились";
+        case T_ENC_ARGUE: return "поссорились";
+        default: return "разошлись";
+    }
+}
+
+/* Start a pose. A gesture already at full strength is not interrupted, so an
+ * encounter cannot cut a bow off halfway through. */
+static inline void TGesture(TFLY *fly, int g) {
+    if (fly == NULL) return;
+    int id = TClampIdx(g, TFLY_N_GESTURE);
+    if (id == T_GES_IDLE) return;
+    if (fly->gesture != T_GES_IDLE && fly->gesture_strength > 0.5f) return;
+    fly->gesture = id;
+    fly->gesture_phase = 0.0f;
+    fly->gesture_strength = 0.0f;
+}
+
+/* Start a pose, interrupting whatever was running.
+ *
+ * Used for direct control. The guarded version above would silently drop the
+ * request if a previous pose were still at full strength, which is the right
+ * behaviour for an automatic encounter and the wrong one for a button press. */
+static inline void TGestureForce(TFLY *fly, int g) {
+    if (fly == NULL) return;
+    fly->gesture = TClampIdx(g, TFLY_N_GESTURE);
+    fly->gesture_phase = 0.0f;
+    fly->gesture_strength = 0.0f;
+}
+
+/* Can this fly start an encounter right now? */
+static inline int TCanEncounter(TFLY *fly) {
+    return fly != NULL && fly->encounter_cool <= 0.0f;
+}
+
+/*
+ * Two flies meet. The pair is symmetric: both feel the same thing and both
+ * gain or lose bond, because an encounter that moved only one side would not
+ * be a relationship.
+ *
+ * Returns 1 if the encounter happened. Cooldowns are respected, so a pair
+ * standing together does not repeat the same greeting over and over.
+ */
+static inline int TEncounter(TFLY *a, TFLY *b, int kind) {
+    if (a == NULL || b == NULL) return 0;
+    if (!TCanEncounter(a) || !TCanEncounter(b)) return 0;
+
+    int e = TClampIdx(kind, TFLY_N_ENCOUNTER);
+    /* A quarrel takes longer to get over than a greeting. */
+    float cool = (e == T_ENC_ARGUE) ? 9.0f : ((e == T_ENC_IGNORE) ? 3.0f : 5.0f);
+    a->encounter_cool = cool;
+    b->encounter_cool = cool;
+    a->last_encounter = e;
+    b->last_encounter = e;
+
+    float bond_delta = 0.0f;
+    switch (e) {
+        case T_ENC_GREET:     bond_delta = 0.08f;  break;
+        case T_ENC_BOW:       bond_delta = 0.06f;  break;
+        case T_ENC_HIGH_FIVE: bond_delta = 0.10f;  break;
+        case T_ENC_COMFORT:   bond_delta = 0.14f;  break;
+        case T_ENC_SHARE:     bond_delta = 0.18f;  break;
+        case T_ENC_ARGUE:     bond_delta = -0.12f; break;
+        default:              bond_delta = -0.01f; break;
+    }
+    /* Warmth scales how much a positive encounter means, so a cold fly gets
+     * less out of being greeted than an affectionate one. */
+    float warmth = TClamp(0.5f + 0.5f * (a->emotion[T_EMO_AFFECTION] + b->emotion[T_EMO_AFFECTION]),
+                          0.2f, 1.2f);
+    a->bond = TClamp(a->bond + bond_delta * warmth, 0.0f, 1.0f);
+    b->bond = TClamp(b->bond + bond_delta * warmth, 0.0f, 1.0f);
+
+    /* Poses, so the rig has something to show. */
+    switch (e) {
+        case T_ENC_GREET:     TGesture(a, T_GES_WAVE);  TGesture(b, T_GES_WAVE);  break;
+        case T_ENC_BOW:       TGesture(a, T_GES_BOW);   TGesture(b, T_GES_BOW);   break;
+        case T_ENC_HIGH_FIVE: TGesture(a, T_GES_CLAP);  TGesture(b, T_GES_CLAP);  break;
+        case T_ENC_COMFORT:   TGesture(a, T_GES_COVER); TGesture(b, T_GES_COVER); break;
+        case T_ENC_SHARE:     TGesture(a, T_GES_POINT); TGesture(b, T_GES_POINT); break;
+        case T_ENC_ARGUE:     TGesture(a, T_GES_SHRUG); TGesture(b, T_GES_SHRUG); break;
+        default:              TGesture(a, T_GES_IDLE);  TGesture(b, T_GES_IDLE);  break;
+    }
+
+    /* Affect. Both feel it, with a little asymmetry so a pair does not mirror
+     * each other perfectly. */
+    float j, s, f, t, an;
+    switch (e) {
+        case T_ENC_GREET:     j = 0.30f; s = 0.10f; f = 0.00f; t = 0.20f; an = 0.00f; break;
+        case T_ENC_BOW:       j = 0.20f; s = 0.05f; f = 0.00f; t = 0.30f; an = 0.00f; break;
+        case T_ENC_HIGH_FIVE: j = 0.40f; s = 0.05f; f = 0.00f; t = 0.25f; an = 0.00f; break;
+        case T_ENC_COMFORT:   j = 0.25f; s = 0.05f; f = 0.00f; t = 0.40f; an = 0.00f; break;
+        case T_ENC_SHARE:     j = 0.45f; s = 0.00f; f = 0.00f; t = 0.50f; an = 0.00f; break;
+        case T_ENC_ARGUE:     j = 0.00f; s = 0.25f; f = 0.20f; t = 0.00f; an = 0.45f; break;
+        default:              j = 0.00f; s = 0.05f; f = 0.00f; t = 0.00f; an = 0.00f; break;
+    }
+    float side = 0.9f + 0.2f * TRand(a);
+    TFLY *pair[2];
+    pair[0] = a;
+    pair[1] = b;
+    for (int i = 0; i < 2; i++) {
+        TFLY *who = pair[i];
+        float k = (i == 0) ? side : (1.9f - side);
+        who->emotion[T_EMO_JOY] = TClamp(who->emotion[T_EMO_JOY] + j * k, 0.0f, 1.0f);
+        who->emotion[T_EMO_SADNESS] = TClamp(who->emotion[T_EMO_SADNESS] + s * k, 0.0f, 1.0f);
+        who->emotion[T_EMO_FEAR] = TClamp(who->emotion[T_EMO_FEAR] + f * k, 0.0f, 1.0f);
+        who->emotion[T_EMO_TRUST] = TClamp(who->emotion[T_EMO_TRUST] + t * k, 0.0f, 1.0f);
+        who->emotion[T_EMO_ANGER] = TClamp(who->emotion[T_EMO_ANGER] + an * k, 0.0f, 1.0f);
+        who->emotion[T_EMO_AFFECTION] =
+            TClamp(who->emotion[T_EMO_AFFECTION] + t * 0.6f * k, 0.0f, 1.0f);
+    }
+    return 1;
+}
+
+/*
+ * How likely a fly is to start an encounter, 0..1. Affection and longing pull
+ * her toward company, shyness holds her back, and anger ruins it entirely.
+ */
+static inline float TEncounterDrive(TFLY *fly) {
+    if (fly == NULL) return 0.0f;
+    if (fly->encounter_cool > 0.0f) return 0.0f;
+    float social = fly->emotion[T_EMO_AFFECTION] + fly->emotion[T_EMO_LONGING];
+    float shy = fly->emotion[T_EMO_SHYNESS];
+    /* Fear is a hard brake, because a frightened animal hides rather than
+     * introducing itself. Without this term a badly hurt fly would still be
+     * walking toward whoever hurt her. */
+    float fear = fly->emotion[T_EMO_FEAR] + fly->emotion[T_EMO_DREAD];
+    float raw = social * (1.0f - 0.5f * shy) - 0.5f * fly->emotion[T_EMO_ANGER] -
+                1.2f * fear;
+    return TClamp(raw, 0.0f, 1.0f);
 }
 
 static inline const char *TFlyBodyName(int r) {

@@ -70,6 +70,27 @@
           <div class="readout-head"><span>ЭМОЦИИ</span><span id="affect-count">0</span></div>
           <div id="affect-list" class="affect-list"></div>
         </div>
+        <div class="face-block">
+          <div class="readout-head"><span>МИМИКА</span><span id="face-blink">глаза открыты</span></div>
+          <div class="face-gauges">
+            <div><span>веки</span><div class="meter"><i id="face-blink-meter"></i></div></div>
+            <div><span>зрачок</span><div class="meter"><i id="face-pupil-meter"></i></div></div>
+            <div><span>брови</span><div class="meter"><i id="face-brow-meter"></i></div></div>
+            <div><span>рот</span><div class="meter"><i id="face-mouth-meter"></i></div></div>
+            <div><span>румянец</span><div class="meter"><i id="face-blush-meter"></i></div></div>
+            <div><span>слёзы</span><div class="meter"><i id="face-tears-meter"></i></div></div>
+          </div>
+        </div>
+        <div class="social-block">
+          <div class="readout-head"><span>ОБЩЕНИЕ</span><span id="social-partner">одинока</span></div>
+          <div class="social-row"><span>жест</span><b id="social-gesture">покой</b></div>
+          <div class="social-row"><span>связь</span><div class="meter"><i id="social-bond-meter"></i></div></div>
+          <div class="social-row"><span>последняя встреча</span><b id="social-last">—</b></div>
+          <div class="train-actions">
+            <button id="gesture-cycle" class="button">Жест</button>
+            <button id="meet-button" class="button primary">Познакомить</button>
+          </div>
+        </div>
         <div class="curve-block">
           <div class="readout-head"><span>КРИВАЯ ОБУЧЕНИЯ</span><span id="curve-label">нет данных</span></div>
           <canvas id="curve" class="curve" width="260" height="46"></canvas>

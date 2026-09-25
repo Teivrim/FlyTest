@@ -133,7 +133,17 @@ h1 { font-size: 24px; } h2 { font-size: 17px; }
 .affect-row { display: grid; grid-template-columns: 1fr 28px; align-items: center; gap: 5px; font-size: 8px; color: var(--muted); }
 .affect-row i { display: block; height: 3px; border-radius: 2px; background: linear-gradient(90deg, #ff5c7a, #ffd76b); }
 .affect-row b { color: #dcecff; font-weight: 600; text-align: right; }
-.train-actions .button.primary { background: linear-gradient(135deg, #ff5c7a, #ff8f5c); border-color: transparent; color: #14060f; font-weight: 600; }
+.affect-row b { color: #dcecff; font-weight: 600; text-align: right; }
+.face-block { margin-top: 12px; }
+.face-gauges { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 10px; margin-top: 6px; }
+.face-gauges > div { display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 5px; }
+.face-gauges span { color: var(--muted); font-size: 8px; }
+.face-gauges .meter { height: 3px; }
+.social-block { margin-top: 12px; padding: 10px; border: 1px solid rgba(255,159,250,.24); border-radius: 10px; background: linear-gradient(135deg, rgba(255,159,250,.06), rgba(169,139,255,.05)); }
+.social-block .readout-head { color: #ff9ffa; }
+.social-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 6px; margin-top: 5px; color: var(--muted); font-size: 9px; }
+.social-row b { color: #eafffb; font-weight: 600; }
+.social-row .meter { height: 3px; }
 
 /* ---- act list ---- */
 .acts-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
