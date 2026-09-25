@@ -7,6 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::tfly::{self, action, cue};
+
 pub const DEFAULT_PORT: u16 = 8765;
 pub const DEFAULT_FLIES: usize = 3;
 const MAX_FLIES: usize = 8;
@@ -81,6 +83,59 @@ pub struct AdventureSnapshot {
     pub target: [f32; 2],
 }
 
+/// Training state of one fly, surfaced in the inspector.
+#[derive(Debug, Clone, Serialize)]
+pub struct BrainSnapshot {
+    pub act: String,
+    pub mood: String,
+    pub drive: String,
+    pub thought: String,
+    pub mastery: f32,
+    pub trials: u32,
+    pub correct: u32,
+    pub xp: u32,
+    pub level: u32,
+    pub weight: f32,
+    pub gate: f32,
+    pub plasticity: f32,
+    pub valence: f32,
+    pub arousal: f32,
+    pub pain: f32,
+    pub energy: f32,
+    pub stress: f32,
+    pub memory: i32,
+    pub last_lesson: String,
+    pub last_outcome: String,
+}
+
+/// One act in the act list, with the current fly's progress on it.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActSnapshot {
+    pub id: String,
+    pub name: String,
+    pub subtitle: String,
+    pub lesson: String,
+    pub color: String,
+    pub origin: [f32; 2],
+    pub cue: String,
+    pub solution: String,
+    /// Mastery of the selected fly on this act, 0..1.
+    pub mastery: f32,
+    /// How strongly the fly currently associates the cue with the solution.
+    pub weight: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TrainingSnapshot {
+    pub enabled: bool,
+    pub epsilon: f32,
+    pub interval: f32,
+    pub current_act: usize,
+    pub total_trials: u64,
+    pub total_correct: u64,
+    pub average_mastery: f32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EditorSnapshot {
     pub tick: u64,
@@ -90,6 +145,9 @@ pub struct EditorSnapshot {
     pub selected_fly: Option<u32>,
     pub agents: Vec<AgentSnapshot>,
     pub adventure: AdventureSnapshot,
+    pub acts: Vec<ActSnapshot>,
+    pub training: TrainingSnapshot,
+    pub brain: Option<BrainSnapshot>,
     pub metrics: EditorMetrics,
     pub model_note: String,
 }
@@ -128,6 +186,8 @@ struct Agent {
     hormone_level: f32,
     hormone_enabled: bool,
     channel: &'static str,
+    /// The stage this fly belongs to. Its policy flies it here.
+    anchor: [f32; 2],
 }
 
 impl Agent {
@@ -167,7 +227,18 @@ impl Agent {
             hormone_level: 0.0,
             hormone_enabled: index.is_multiple_of(2),
             channel: if index == 0 { "input" } else { "internal" },
+            anchor: [0.0, 0.0],
         }
+    }
+
+    /// Nudge the fly toward a point, without teleporting it.
+    ///
+    /// The act's stage is set as the fly's own attraction point rather than as
+    /// an external push. That matters: `step` drives velocity toward the
+    /// agent's `desired` vector every tick, so an external nudge would be
+    /// washed out within a few frames and the fly would never actually arrive.
+    fn steer_towards(&mut self, target: [f32; 2], _gain: f32, _dt: f32) {
+        self.anchor = target;
     }
 
     fn step(&mut self, time: f32, dt: f32, speed: f32, decay: f32) {
@@ -175,8 +246,8 @@ impl Agent {
         self.light = (0.5 + 0.35 * (time * 0.7).sin()).clamp(0.0, 1.0);
         self.odor = (0.5 + 0.3 * (time * 0.43 + self.id as f32 * 0.17).sin()).clamp(0.0, 1.0);
         self.temperature = (0.5 + 0.15 * (time * 0.2).sin()).clamp(0.0, 1.0);
-        let boundary = ((self.position[0].abs() - 4.5).max(0.0)
-            + (self.position[1].abs() - 2.8).max(0.0))
+        let boundary = ((self.position[0].abs() - 8.0).max(0.0)
+            + (self.position[1].abs() - 8.0).max(0.0))
         .clamp(0.0, 1.0);
         self.touch = ((self.velocity[0].abs() + self.velocity[1].abs()) * 0.2 + boundary * 0.8)
             .clamp(0.0, 1.0);
@@ -189,17 +260,29 @@ impl Agent {
         let reaction = (turn * 0.5 + wave * 0.5).abs() * decay;
         self.reaction_level = reaction.clamp(0.0, 1.0);
 
-        let desired_x = (self.odor - 0.5) * 2.4 + (time * 0.35 + self.id as f32).sin() * 0.9
-            - self.position[0] * 0.08;
-        let desired_y = (self.light - 0.5) * 1.6 + (time * 0.27 + self.id as f32 * 1.7).cos() * 0.7
-            - self.position[1] * 0.1;
+        // The fly flies to its act's stage. The attractor is the anchor plus a
+        // slow per-fly orbit, so a troupe arriving at one act spreads out into
+        // a loose formation instead of collapsing onto a single point.
+        let orbit_r = 0.55 + 0.18 * self.id as f32;
+        let orbit_a = time * 0.5 + self.id as f32 * 2.1;
+        let goal_x = self.anchor[0] + orbit_r * orbit_a.cos();
+        let goal_y = self.anchor[1] + orbit_r * orbit_a.sin();
+        // Odour and light still bias the approach, so the flight is not a
+        // straight line, but the anchor dominates.
+        let desired_x = (goal_x - self.position[0]) * 0.55
+            + (self.odor - 0.5) * 0.9
+            + (time * 0.35 + self.id as f32).sin() * 0.25;
+        let desired_y = (goal_y - self.position[1]) * 0.55
+            + (self.light - 0.5) * 0.6
+            + (time * 0.27 + self.id as f32 * 1.7).cos() * 0.2;
         let desired_z = 1.25 + (time * 0.8 + self.id as f32).sin() * 0.45;
         let desired = [desired_x, desired_y, desired_z];
         for (axis, target) in desired.iter().enumerate() {
             self.velocity[axis] += (*target - self.velocity[axis]) * dt * 2.4 * speed;
             self.position[axis] += self.velocity[axis] * dt * speed;
         }
-        for (axis, limit) in [(0, 5.5), (1, 3.5)] {
+        // Bound the arena generously, since the act stages sit at +-6.4.
+        for (axis, limit) in [(0, 9.2), (1, 9.2)] {
             if self.position[axis].abs() > limit {
                 self.position[axis] = self.position[axis].clamp(-limit, limit);
                 self.velocity[axis] *= -0.45;
@@ -267,6 +350,158 @@ fn adventure_spec(id: &str) -> (&'static str, &'static str) {
     }
 }
 
+// ===========================================================================
+// The five acts
+//
+// Each act is a place, a stimulus, and one thing the fly has to learn. The
+// lesson is a cue/action pair, so the fly's own associative weights decide
+// whether it solves the act. Nothing is scripted as a success animation: the
+// mastery bar reflects the real weight the C core accumulated.
+// ===========================================================================
+
+/// A circus act: where it is, what it looks like, and what it teaches.
+pub struct Act {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub subtitle: &'static str,
+    pub lesson: &'static str,
+    /// Centre of the act's stage, in arena coordinates.
+    pub origin: [f32; 2],
+    /// Accent colour, used by both the 3D scene and the CSS.
+    pub color: &'static str,
+    /// The conditioned stimulus the act presents.
+    pub cue: i32,
+    /// The action that solves it.
+    pub solution: i32,
+    /// A plausible wrong answer, so the fly must discriminate.
+    pub distractor: i32,
+    /// The action the fly performs when it is idle in this act.
+    pub ambience: i32,
+}
+
+pub const CANDIDATES: [i32; 6] = [
+    action::DANCE,
+    action::EAT,
+    action::REST,
+    action::TURN_R,
+    action::TURN_L,
+    action::FORWARD,
+];
+
+pub const ACTS: [Act; 5] = [
+    Act {
+        id: "main_stage",
+        name: "Главная арена",
+        subtitle: "Прожекторы, аплодисменты, купол",
+        lesson: "Яркий свет вызывает танец",
+        origin: [0.0, 0.0],
+        color: "#ff5c7a",
+        cue: cue::LIGHT,
+        solution: action::DANCE,
+        distractor: action::REST,
+        ambience: action::FLAP,
+    },
+    Act {
+        id: "labyrinth",
+        name: "Лабиринт",
+        subtitle: "Стены, повороты, ориентиры",
+        lesson: "Вибрация пола ведёт к цели",
+        origin: [6.4, 0.0],
+        color: "#54d7e8",
+        cue: cue::VIBRATION,
+        solution: action::TURN_R,
+        distractor: action::TURN_L,
+        ambience: action::FORWARD,
+    },
+    Act {
+        id: "garden",
+        name: "Чародейный сад",
+        subtitle: "Цветы, фруктовый аромат, тепло",
+        lesson: "Запах фрукта ведёт к еде",
+        origin: [0.0, 6.0],
+        color: "#8ce06a",
+        cue: cue::ODOR_FRUIT,
+        solution: action::EAT,
+        distractor: action::DANCE,
+        ambience: action::FLAP,
+    },
+    Act {
+        id: "factory",
+        name: "Фабрика чудес",
+        subtitle: "Шестерни, металл, громкий стук",
+        lesson: "Стук требует точного движения",
+        origin: [-6.4, 0.0],
+        color: "#ffb86b",
+        cue: cue::SOUND,
+        solution: action::FORWARD,
+        distractor: action::REST,
+        ambience: action::FLAP,
+    },
+    Act {
+        id: "void",
+        name: "Пустота",
+        subtitle: "Ни света, ни звука, ни края",
+        lesson: "В темноте нужно замереть",
+        origin: [0.0, -6.0],
+        color: "#a98bff",
+        cue: cue::DARK,
+        solution: action::REST,
+        distractor: action::TURN_L,
+        ambience: action::REST,
+    },
+];
+
+fn act_by_id(id: &str) -> Option<&'static Act> {
+    ACTS.iter().find(|act| act.id == id)
+}
+
+/// Russian label for a conditioned stimulus.
+fn cue_name(cue_id: i32) -> &'static str {
+    match cue_id {
+        cue::LIGHT => "яркий свет",
+        cue::DARK => "темнота",
+        cue::VIBRATION => "вибрация пола",
+        cue::SOUND => "стук",
+        cue::ODOR_FRUIT => "запах фрукта",
+        cue::ODOR_FLOWER => "запах цветка",
+        cue::ODOR_FEMALE => "запах самки",
+        cue::TOUCH => "прикосновение",
+        cue::TEMPERATURE => "температура",
+        cue::VISUAL => "зрительный образ",
+        cue::GRAVITY => "гравитация",
+        _ => "запах самца",
+    }
+}
+
+/// Russian label for a motor primitive.
+fn action_name(action_id: i32) -> &'static str {
+    match action_id {
+        action::REST => "замереть",
+        action::FORWARD => "лететь вперёд",
+        action::TURN_L => "повернуть налево",
+        action::TURN_R => "повернуть направо",
+        action::UP => "набрать высоту",
+        action::DOWN => "снизиться",
+        action::FLAP => "махать крыльями",
+        action::DANCE => "танцевать",
+        action::EAT => "есть",
+        action::MATE => "ухаживать",
+        _ => "действовать",
+    }
+}
+
+/// Actions a fly may consider in any act.
+///
+/// The set is deliberately small and shared across all five acts, for two
+/// reasons: a fly never has to discriminate between a dozen options, and the
+/// same weight matrix has to carry every lesson, so one act's learning
+/// competes with the others exactly as it would in a real brain.
+///
+/// Every act's `solution` and `distractor` must appear here. The tests assert
+/// that, because a distractor outside the set would silently become dead
+/// weight: the fly could never earn the partial credit it implies.
+pub use CANDIDATES as CANDIDATE_ACTIONS;
+
 pub struct EditorRuntime {
     agents: Vec<Agent>,
     selected: Option<u32>,
@@ -282,6 +517,171 @@ pub struct EditorRuntime {
     adventure_id: String,
     adventure_score: u32,
     adventure_target: [f32; 2],
+    /// One trained brain per fly, indexed like `agents`.
+    brains: Vec<Brain>,
+    /// Which act each fly is currently in.
+    acts: Vec<usize>,
+    /// The act the runtime is broadcasting to.
+    current_act: usize,
+    /// Epsilon for exploration while training.
+    epsilon: f32,
+    /// How often, in sim seconds, one training trial runs per fly.
+    trial_interval: f32,
+    trial_timer: f32,
+    /// Whether the runtime keeps training the flies.
+    training: bool,
+    /// Aggregated across every fly, for the headline numbers.
+    total_trials: u64,
+    total_correct: u64,
+}
+
+/// Per-fly training bookkeeping, on top of the C brain's own weights.
+struct Brain {
+    fly: tfly::Fly,
+    /// Smoothed success rate over recent trials.
+    mastery: f32,
+    trials: u32,
+    correct: u32,
+    /// Experience points, awarded for correct trials.
+    xp: u32,
+    level: u32,
+    /// The last lesson the fly attempted.
+    last_lesson: &'static str,
+    last_outcome: &'static str,
+    /// A short, readable trace of what the fly was weighing up.
+    thought: String,
+}
+
+impl Brain {
+    fn new(seed: u32) -> Self {
+        let mut fly = tfly::Fly::new();
+        fly.seed(seed);
+        Self {
+            fly,
+            mastery: 0.0,
+            trials: 0,
+            correct: 0,
+            xp: 0,
+            level: 1,
+            last_lesson: "",
+            last_outcome: "ожидание",
+            thought: "муха ещё ничего не пробовала".to_owned(),
+        }
+    }
+
+    /// Mastery on a specific act, derived from the brain's own weight rather
+    /// than from the smoothed running average. This is what lets the act list
+    /// show which lesson is actually stuck.
+    ///
+    /// The weight is clamped to -1..1 inside the C core, so a saturated weight
+    /// of 1.0 means the lesson is fully learned. Rescaling from 0 rather than
+    /// from the midpoint matters: an untouched fly must read as 0% mastery,
+    /// not 50%.
+    fn mastery_for(&self, act: &Act) -> f32 {
+        self.fly.weight(act.cue, act.solution).clamp(0.0, 1.0)
+    }
+
+    /// Fold a trial result into the fly's statistics and rewrite its trace.
+    fn record(&mut self, act: &Act, result: &tfly::TrialResult) {
+        self.trials = self.trials.saturating_add(1);
+        let hit = result.outcome == tfly::TrialOutcome::Correct;
+        if hit {
+            self.correct = self.correct.saturating_add(1);
+            self.xp = self.xp.saturating_add(10);
+        } else {
+            self.xp = self.xp.saturating_add(2);
+        }
+        self.level = 1 + self.xp / 100;
+        // Smoothed, so a single bad trial does not erase progress.
+        self.mastery = self.mastery * 0.9 + f32::from(hit) * 0.1;
+        self.last_lesson = act.id;
+        self.last_outcome = match result.outcome {
+            tfly::TrialOutcome::Correct => "верно",
+            tfly::TrialOutcome::Partial => "почти",
+            tfly::TrialOutcome::Wrong => "ошибка",
+        };
+        self.thought = self.compose_thought(act);
+    }
+
+    /// Compose the readable inner trace.
+    ///
+    /// This is a rendering of the brain's actual state, not a scripted line.
+    /// Distress wins over learning because in the C core pain suppresses
+    /// courtship and eating regardless of what the fly has learned.
+    fn compose_thought(&mut self, act: &Act) -> String {
+        let pain = self.fly.emotion_level(tfly::emotion::PAIN);
+        let fear = self.fly.fear_level();
+        let weight = self.fly.weight(act.cue, act.solution);
+        let gate = self.fly.learning_gate();
+
+        if pain > 0.25 {
+            return format!(
+                "боль {pain:.0}% перебивает всё — ухожу от источника (урок «{}» забыт)",
+                act.lesson
+            );
+        }
+        if fear > 0.45 {
+            return format!(
+                "страх {fear:.0}% доминирует, план «{}» отложен, гейт {:.0}%",
+                act.lesson,
+                gate * 100.0
+            );
+        }
+        if self.fly.is_asleep() {
+            return "сплю, консолидирую associations".to_owned();
+        }
+        if weight < 0.0 {
+            return format!(
+                "пробовал «{}» и ошибаюсь: вес {:.0}%, ищу новую стратегию",
+                act.lesson,
+                weight * 100.0
+            );
+        }
+        if weight < 0.25 {
+            return format!(
+                "«{}»: нащупываю, вес {:.0}%, гейт {:.0}%, пробую чаще",
+                act.lesson,
+                weight * 100.0,
+                gate * 100.0
+            );
+        }
+        format!(
+            "«{}»: уверенно, вес {:.0}%, гейт {:.0}%, следую плану",
+            act.lesson,
+            weight * 100.0,
+            gate * 100.0
+        )
+    }
+}
+
+/// Put an act's stimulus into the fly's sensory channels.
+fn present_act(fly: &mut tfly::Fly, act: &Act) {
+    match act.cue {
+        c if c == cue::LIGHT => {
+            fly.light(0.95);
+            fly.attention(tfly::sense::LIGHT, 2.0);
+        }
+        c if c == cue::DARK => {
+            fly.light(0.02);
+            fly.attention(tfly::sense::LIGHT, 2.0);
+        }
+        c if c == cue::VIBRATION => {
+            fly.vibration(0.9);
+            fly.attention(tfly::sense::VIBRATION, 2.0);
+        }
+        c if c == cue::SOUND => {
+            fly.sound(0.9);
+            fly.attention(tfly::sense::SOUND, 2.0);
+        }
+        c if c == cue::ODOR_FRUIT => {
+            fly.odor(0.85, tfly::odor::FRUIT);
+            fly.attention(tfly::sense::ODOR, 2.0);
+        }
+        _ => {
+            fly.light(0.5);
+        }
+    }
+    fly.attend_all(0.8);
 }
 
 impl EditorRuntime {
@@ -306,7 +706,130 @@ impl EditorRuntime {
             adventure_id: "free_flight".to_owned(),
             adventure_score: 0,
             adventure_target: [0.0, 0.0],
+            brains: (0..count)
+                .map(|index| Brain::new(0x5EED + index as u32))
+                .collect(),
+            acts: vec![0; count],
+            current_act: 0,
+            epsilon: 0.25,
+            trial_interval: 0.9,
+            trial_timer: 0.0,
+            training: true,
+            total_trials: 0,
+            total_correct: 0,
         }
+    }
+
+    /// The act the runtime is currently broadcasting to.
+    fn current(&self) -> &'static Act {
+        &ACTS[self.current_act.min(ACTS.len() - 1)]
+    }
+
+    /// Move a fly into an act and point its attention at that act's stimulus.
+    fn send_to_act(&mut self, agent_index: usize, act_index: usize) {
+        let act = &ACTS[act_index.min(ACTS.len() - 1)];
+        self.acts[agent_index] = act_index;
+        let brain = &mut self.brains[agent_index];
+        brain.fly.seed(0x5EED + agent_index as u32);
+        brain.fly.clear_hormones();
+        present_act(&mut brain.fly, act);
+    }
+
+    /// Run one training trial for every fly, on the act each fly is in.
+    fn run_trials(&mut self) {
+        for index in 0..self.agents.len() {
+            let act = &ACTS[self.acts[index].min(ACTS.len() - 1)];
+            let brain = &mut self.brains[index];
+            brain.fly.steps(6, FIXED_DT);
+            let result = brain.fly.train_trial(
+                &tfly::Lesson {
+                    id: act.id,
+                    name: act.name,
+                    objective: act.lesson,
+                    cue: act.cue,
+                    solution: act.solution,
+                    distractor: act.distractor,
+                },
+                self.epsilon,
+                &CANDIDATES,
+            );
+            brain.record(act, &result);
+            self.total_trials = self.total_trials.saturating_add(1);
+            if result.outcome == tfly::TrialOutcome::Correct {
+                self.total_correct = self.total_correct.saturating_add(1);
+                self.learning_updates = self.learning_updates.saturating_add(1);
+            }
+        }
+    }
+
+    /// Mean mastery across every fly.
+    fn average_mastery(&self) -> f32 {
+        if self.brains.is_empty() {
+            return 0.0;
+        }
+        self.brains.iter().map(|b| b.mastery).sum::<f32>() / self.brains.len() as f32
+    }
+
+    /// The five acts, annotated with the selected fly's progress on each.
+    fn act_snapshots(&self) -> Vec<ActSnapshot> {
+        let selected = self
+            .selected
+            .and_then(|id| self.agents.iter().position(|agent| agent.id == id))
+            .or(Some(0));
+        ACTS.iter()
+            .map(|act| {
+                let (mastery, weight) = match selected {
+                    Some(si) => (
+                        self.brains[si].mastery_for(act),
+                        self.brains[si].fly.weight(act.cue, act.solution),
+                    ),
+                    None => (0.0, 0.0),
+                };
+                ActSnapshot {
+                    id: act.id.to_owned(),
+                    name: act.name.to_owned(),
+                    subtitle: act.subtitle.to_owned(),
+                    lesson: act.lesson.to_owned(),
+                    color: act.color.to_owned(),
+                    origin: act.origin,
+                    cue: cue_name(act.cue).to_owned(),
+                    solution: action_name(act.solution).to_owned(),
+                    mastery,
+                    weight,
+                }
+            })
+            .collect()
+    }
+
+    /// Full brain readout for the selected fly.
+    fn brain_snapshot(&self) -> Option<BrainSnapshot> {
+        let index = self
+            .selected
+            .and_then(|id| self.agents.iter().position(|agent| agent.id == id))?;
+        let act = &ACTS[self.acts[index].min(ACTS.len() - 1)];
+        let brain = &self.brains[index];
+        Some(BrainSnapshot {
+            act: act.name.to_owned(),
+            mood: brain.fly.dominant_emotion().to_owned(),
+            drive: brain.fly.dominant_drive().to_owned(),
+            thought: brain.thought.clone(),
+            mastery: brain.mastery,
+            trials: brain.trials,
+            correct: brain.correct,
+            xp: brain.xp,
+            level: brain.level,
+            weight: brain.fly.weight(act.cue, act.solution),
+            gate: brain.fly.learning_gate(),
+            plasticity: brain.fly.plasticity_level(),
+            valence: brain.fly.valence(),
+            arousal: brain.fly.arousal(),
+            pain: brain.fly.pain_total(),
+            energy: brain.fly.energy(),
+            stress: brain.fly.stress(),
+            memory: brain.fly.memory_count(),
+            last_lesson: brain.last_lesson.to_owned(),
+            last_outcome: brain.last_outcome.to_owned(),
+        })
     }
 
     fn update_adventure_target(&mut self) {
@@ -329,23 +852,44 @@ impl EditorRuntime {
         self.tick += 1;
         self.update_adventure_target();
         let target = self.adventure_target;
-        for agent in &mut self.agents {
-            agent.step(self.time, dt, self.speed, self.decay);
+        for index in 0..self.agents.len() {
+            let act = &ACTS[self.acts[index].min(ACTS.len() - 1)];
+            let [ax, ay] = act.origin;
+            self.agents[index].step(self.time, dt, self.speed, self.decay);
+            // A fly in an act hovers over that act's stage, so the scene reads
+            // as five groups of performers rather than one undifferentiated swarm.
+            self.agents[index].steer_towards([ax, ay], 1.2, dt * self.speed);
             self.total_reactions += 1;
-            if agent.hormone_level > 0.25 {
+            if self.agents[index].hormone_level > 0.25 {
                 self.total_hormones += 1;
             }
-            if agent.puff_just_started {
+            if self.agents[index].puff_just_started {
                 self.total_puffs = self.total_puffs.saturating_add(1);
             }
             if self.adventure_id != "free_flight" {
-                let dx = agent.position[0] - target[0];
-                let dy = agent.position[1] - target[1];
+                let dx = self.agents[index].position[0] - target[0];
+                let dy = self.agents[index].position[1] - target[1];
                 if (dx * dx + dy * dy).sqrt() < 0.85 {
                     self.adventure_score = self.adventure_score.saturating_add(1);
                     self.learning_updates += 1;
-                    agent.reward = (agent.reward + 0.08).min(1.0);
+                    self.agents[index].reward = (self.agents[index].reward + 0.08).min(1.0);
                 }
+            }
+        }
+
+        // Keep every brain alive so its chemistry, drives and affect evolve
+        // between trials, and present the act it is in.
+        for index in 0..self.agents.len() {
+            let act = &ACTS[self.acts[index].min(ACTS.len() - 1)];
+            self.brains[index].fly.steps(1, FIXED_DT);
+            present_act(&mut self.brains[index].fly, act);
+        }
+
+        if self.training {
+            self.trial_timer += dt * self.speed;
+            if self.trial_timer >= self.trial_interval {
+                self.trial_timer = 0.0;
+                self.run_trials();
             }
         }
     }
@@ -405,11 +949,26 @@ impl EditorRuntime {
                     id: self.adventure_id.clone(),
                     name: name.to_owned(),
                     objective: objective.to_owned(),
-                    progress: if self.adventure_id == "free_flight" { 1.0 } else { (self.adventure_score % 100) as f32 / 100.0 },
+                    progress: if self.adventure_id == "free_flight" {
+                        1.0
+                    } else {
+                        (self.adventure_score % 100) as f32 / 100.0
+                    },
                     score: self.adventure_score,
                     target: self.adventure_target,
                 }
             },
+            acts: self.act_snapshots(),
+            training: TrainingSnapshot {
+                enabled: self.training,
+                epsilon: self.epsilon,
+                interval: self.trial_interval,
+                current_act: self.current_act,
+                total_trials: self.total_trials,
+                total_correct: self.total_correct,
+                average_mastery: self.average_mastery(),
+            },
+            brain: self.brain_snapshot(),
             metrics: EditorMetrics {
                 fps,
                 total_reactions: self.total_reactions,
@@ -420,7 +979,11 @@ impl EditorRuntime {
                 sim_time: self.time,
                 fixed_timestep_ms: FIXED_DT * 1000.0,
             },
-            model_note: "Real-time editor uses a lightweight deterministic policy; swap in a model adapter for biological experiments.".to_owned(),
+            model_note: format!(
+                "TFLY.h core, three-factor learning. Broadcast act: {} ({}).",
+                self.current().name,
+                self.current().lesson
+            ),
         }
     }
 
@@ -477,8 +1040,114 @@ impl EditorRuntime {
                 self.adventure_score = 0;
                 self.update_adventure_target();
             }
+            // Send flies into one of the five acts. Without an id, every fly
+            // goes; with an id, only that fly does.
+            "act" => {
+                let requested = command.name.context("act requires name")?;
+                let act = act_by_id(&requested).context("unknown act")?;
+                let act_index = ACTS
+                    .iter()
+                    .position(|candidate| candidate.id == act.id)
+                    .unwrap_or(0);
+                self.current_act = act_index;
+                self.adventure_id = "free_flight".to_owned();
+                self.update_adventure_target();
+                match command.id {
+                    Some(id) => {
+                        if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                            self.send_to_act(index, act_index);
+                        }
+                    }
+                    None => {
+                        for index in 0..self.agents.len() {
+                            self.send_to_act(index, act_index);
+                        }
+                    }
+                }
+            }
+            // Train the selected fly hard in its current act, for a burst of
+            // trials without waiting for the timer.
+            "train" => {
+                let burst = (command.value.unwrap_or(40.0) as usize).clamp(1, 2000);
+                let index = self
+                    .selected
+                    .and_then(|id| self.agents.iter().position(|agent| agent.id == id))
+                    .or(Some(0));
+                if let Some(index) = index {
+                    let act_index = self.acts[index];
+                    for _ in 0..burst {
+                        let act = &ACTS[act_index];
+                        let brain = &mut self.brains[index];
+                        let result = brain.fly.train_trial(
+                            &tfly::Lesson {
+                                id: act.id,
+                                name: act.name,
+                                objective: act.lesson,
+                                cue: act.cue,
+                                solution: act.solution,
+                                distractor: act.distractor,
+                            },
+                            self.epsilon,
+                            &CANDIDATES,
+                        );
+                        brain.record(act, &result);
+                        self.total_trials = self.total_trials.saturating_add(1);
+                        if result.outcome == tfly::TrialOutcome::Correct {
+                            self.total_correct = self.total_correct.saturating_add(1);
+                            self.learning_updates = self.learning_updates.saturating_add(1);
+                        }
+                    }
+                }
+            }
+            "training" => {
+                self.training = command.enabled.unwrap_or(!self.training);
+            }
+            "epsilon" => {
+                self.epsilon = command.value.unwrap_or(self.epsilon).clamp(0.0, 1.0);
+            }
+            // Send a pain signal to a fly, for teaching avoidance.
+            "hurt" => {
+                let id = command.id.context("hurt requires id")?;
+                let intensity = command.value.unwrap_or(0.7).clamp(0.0, 1.0);
+                if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                    self.brains[index].fly.heart(intensity, tfly::body::WING_L);
+                    self.brains[index].fly.steps(2, FIXED_DT);
+                    self.brains[index].thought = self.brains[index]
+                        .compose_thought(&ACTS[self.acts[index].min(ACTS.len() - 1)]);
+                }
+            }
+            // Hormone administration. With `name` it injects into the C brain,
+            // e.g. dopamine to open the learning gate. With `enabled` it toggles
+            // the fly's own endocrine channel in the editor.
             "hormone" => {
                 let id = command.id.context("hormone requires id")?;
+                if let Some(name) = command.name.as_deref() {
+                    let intensity = command.value.unwrap_or(0.5).clamp(0.0, 1.0);
+                    if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                        self.brains[index].fly.hormone_named(intensity, name, 5.0);
+                    }
+                } else if let Some(enabled) = command.enabled
+                    && let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id)
+                {
+                    agent.hormone_enabled = enabled;
+                }
+            }
+            // Wipe a fly's learning, keeping its body state.
+            "unlearn" => {
+                let id = command.id.context("unlearn requires id")?;
+                if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                    let brain = &mut self.brains[index];
+                    brain.fly.reset_learning();
+                    brain.fly.forget();
+                    brain.mastery = 0.0;
+                    brain.xp = 0;
+                    brain.level = 1;
+                    brain.trials = 0;
+                    brain.correct = 0;
+                }
+            }
+            "hormone_toggle" => {
+                let id = command.id.context("hormone_toggle requires id")?;
                 let enabled = command.enabled.unwrap_or(true);
                 if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) {
                     agent.hormone_enabled = enabled;
@@ -488,13 +1157,19 @@ impl EditorRuntime {
                 if self.agents.len() < MAX_FLIES {
                     let id = self.agents.iter().map(|agent| agent.id).max().unwrap_or(0) + 1;
                     self.agents.push(Agent::new(id, self.agents.len()));
+                    self.brains.push(Brain::new(0x5EED + id));
+                    self.acts.push(self.current_act);
                     self.selected = Some(id);
                 }
             }
             "remove" => {
                 let id = command.id.context("remove requires id")?;
                 if self.agents.len() > 1 {
-                    self.agents.retain(|agent| agent.id != id);
+                    if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                        self.agents.remove(index);
+                        self.brains.remove(index);
+                        self.acts.remove(index);
+                    }
                     self.selected = self.agents.first().map(|agent| agent.id);
                 }
             }
@@ -741,6 +1416,225 @@ mod tests {
         assert!(agent.reward > 0.0);
         assert_eq!(snapshot.metrics.total_puff_events, 1);
         assert_eq!(snapshot.metrics.learning_updates, 1);
+    }
+
+    #[test]
+    fn there_are_exactly_five_acts_and_they_are_distinct() {
+        assert_eq!(ACTS.len(), 5);
+        let mut ids: Vec<&str> = ACTS.iter().map(|act| act.id).collect();
+        let count = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "act ids must be unique");
+
+        // Two acts sharing a cue could not be discriminated by the fly, so a
+        // duplicate cue would silently break the curriculum.
+        let mut cues: Vec<i32> = ACTS.iter().map(|act| act.cue).collect();
+        cues.sort_unstable();
+        let before = cues.len();
+        cues.dedup();
+        assert_eq!(cues.len(), before, "each act needs its own cue");
+
+        for act in ACTS {
+            assert!(
+                CANDIDATES.contains(&act.solution),
+                "act {} must have a solvable action",
+                act.id
+            );
+            assert!(
+                CANDIDATES.contains(&act.distractor),
+                "act {} must have a distractor among the candidates",
+                act.id
+            );
+            assert_ne!(act.solution, act.distractor);
+        }
+    }
+
+    #[test]
+    fn send_command_moves_every_fly_to_the_chosen_act() {
+        let mut runtime = EditorRuntime::new(3);
+        for (index, act) in ACTS.iter().enumerate() {
+            runtime
+                .apply_command(format!(r#"{{"action":"act","name":"{}"}}"#, act.id).as_bytes())
+                .expect("act command");
+            assert!(runtime.acts.iter().all(|a| *a == index));
+        }
+        let snapshot = runtime.snapshot(60.0);
+        assert_eq!(snapshot.acts.len(), 5);
+        assert_eq!(snapshot.training.current_act, 4);
+    }
+
+    #[test]
+    fn send_command_can_target_a_single_fly() {
+        let mut runtime = EditorRuntime::new(3);
+        runtime
+            .apply_command(br#"{"action":"act","name":"void","id":2}"#)
+            .expect("act command");
+        assert_eq!(runtime.acts[1], 4, "fly 2 moved");
+        assert_eq!(runtime.acts[0], 0, "fly 1 stayed");
+        assert_eq!(runtime.acts[2], 0, "fly 3 stayed");
+    }
+
+    #[test]
+    fn training_improves_mastery_of_the_current_act() {
+        let mut runtime = EditorRuntime::new(1);
+        runtime
+            .apply_command(br#"{"action":"act","name":"garden"}"#)
+            .expect("act command");
+        let before = runtime.brains[0].mastery;
+        // A burst of trials in one act must move the fly's real associative
+        // weight for that act's lesson.
+        runtime
+            .apply_command(br#"{"action":"train","value":600}"#)
+            .expect("train command");
+        let after = runtime.brains[0].mastery;
+        let act = &ACTS[2];
+        let weight = runtime.brains[0].fly.weight(act.cue, act.solution);
+        assert!(
+            after > before,
+            "mastery must rise with training: {before} -> {after}"
+        );
+        assert!(
+            weight > 0.2,
+            "the fly must actually learn the garden lesson, weight={weight}"
+        );
+    }
+
+    #[test]
+    fn unlearn_wipes_the_brain_but_keeps_the_body() {
+        let mut runtime = EditorRuntime::new(1);
+        runtime
+            .apply_command(br#"{"action":"train","value":200}"#)
+            .expect("train");
+        assert!(runtime.brains[0].xp > 0);
+        runtime
+            .apply_command(br#"{"action":"unlearn","id":1}"#)
+            .expect("unlearn");
+        let brain = &runtime.brains[0];
+        assert_eq!(brain.xp, 0);
+        assert_eq!(brain.level, 1);
+        assert_eq!(brain.trials, 0);
+        for act in ACTS {
+            assert_eq!(brain.fly.weight(act.cue, act.solution), 0.0);
+        }
+    }
+
+    #[test]
+    fn pain_overrides_a_learned_lesson_and_shows_in_the_trace() {
+        let mut runtime = EditorRuntime::new(1);
+        runtime
+            .apply_command(br#"{"action":"train","value":400}"#)
+            .expect("train");
+        runtime
+            .apply_command(br#"{"action":"hurt","id":1,"value":0.9}"#)
+            .expect("hurt");
+        let snapshot = runtime.snapshot(60.0);
+        let brain = snapshot.brain.expect("brain snapshot");
+        assert!(brain.pain > 0.1, "pain must register: {}", brain.pain);
+        assert!(
+            brain.thought.contains("боль"),
+            "the trace must mention pain, got: {}",
+            brain.thought
+        );
+    }
+
+    #[test]
+    fn adding_and_removing_a_fly_keeps_brains_aligned() {
+        let mut runtime = EditorRuntime::new(2);
+        runtime.apply_command(br#"{"action":"add"}"#).expect("add");
+        assert_eq!(runtime.agents.len(), runtime.brains.len());
+        assert_eq!(runtime.agents.len(), runtime.acts.len());
+        runtime
+            .apply_command(br#"{"action":"remove","id":2}"#)
+            .expect("remove");
+        assert_eq!(runtime.agents.len(), 2);
+        assert_eq!(runtime.brains.len(), 2);
+        assert_eq!(runtime.acts.len(), 2);
+    }
+
+    #[test]
+    fn mastery_starts_at_zero_and_reaches_one() {
+        let mut runtime = EditorRuntime::new(1);
+        // An untouched fly must read as no mastery at all, not as a midpoint.
+        for act in ACTS {
+            assert_eq!(
+                runtime.brains[0].mastery_for(&act),
+                0.0,
+                "act {} should start at 0% mastery",
+                act.id
+            );
+        }
+        // After heavy training the lesson should saturate at full mastery,
+        // rather than getting stuck at half because of a bad rescale.
+        runtime
+            .apply_command(br#"{"action":"act","name":"void"}"#)
+            .expect("act");
+        runtime
+            .apply_command(br#"{"action":"train","value":1500}"#)
+            .expect("train");
+        let mastery = runtime.brains[0].mastery_for(&ACTS[4]);
+        assert!(
+            mastery > 0.9,
+            "a fully trained act must read near 100%, got {mastery}"
+        );
+    }
+
+    #[test]
+    fn flies_actually_fly_to_the_act_they_are_sent_to() {
+        let mut runtime = EditorRuntime::new(3);
+        runtime
+            .apply_command(br#"{"action":"act","name":"void"}"#)
+            .expect("act");
+        // Start the troupe far from the void so the test proves convergence
+        // rather than coincidence.
+        for agent in &mut runtime.agents {
+            agent.position = [0.0, 0.0, 1.2];
+        }
+        for _ in 0..900 {
+            runtime.step(FIXED_DT);
+        }
+        let [gx, gy] = ACTS[4].origin;
+        for agent in &runtime.agents {
+            let dx = agent.position[0] - gx;
+            let dy = agent.position[1] - gy;
+            let distance = (dx * dx + dy * dy).sqrt();
+            assert!(
+                distance < 2.0,
+                "fly {} should reach the void, distance {distance}",
+                agent.id
+            );
+        }
+    }
+
+    #[test]
+    fn troupe_spreads_out_instead_of_stacking() {
+        let mut runtime = EditorRuntime::new(3);
+        runtime
+            .apply_command(br#"{"action":"act","name":"garden"}"#)
+            .expect("act");
+        for agent in &mut runtime.agents {
+            agent.position = [0.0, 0.0, 1.2];
+        }
+        for _ in 0..900 {
+            runtime.step(FIXED_DT);
+        }
+        let a = &runtime.agents[0].position;
+        let b = &runtime.agents[1].position;
+        let separation = ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+        assert!(
+            separation > 0.3,
+            "flies sharing a stage must not collapse onto one point, got {separation}"
+        );
+    }
+
+    #[test]
+    fn unknown_act_is_rejected() {
+        let mut runtime = EditorRuntime::new(1);
+        assert!(
+            runtime
+                .apply_command(br#"{"action":"act","name":"moon_base"}"#)
+                .is_err()
+        );
     }
 
     #[test]

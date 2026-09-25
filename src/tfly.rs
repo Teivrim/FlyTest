@@ -147,6 +147,14 @@ unsafe extern "C" {
     fn tfly_vertical_out(handle: *mut TFlyHandle) -> c_float;
     fn tfly_wingbeat(handle: *mut TFlyHandle) -> c_float;
     fn tfly_elapsed(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_action_level(handle: *mut TFlyHandle, a: c_int) -> c_float;
+    fn tfly_memory_count(handle: *mut TFlyHandle) -> c_int;
+    fn tfly_cue_value(handle: *mut TFlyHandle, c: c_int) -> c_float;
+    fn tfly_lifespan(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_attend_all(handle: *mut TFlyHandle, gain: c_float);
+    fn tfly_random(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_act(handle: *mut TFlyHandle, action: c_int, amount: c_float);
+    fn tfly_clear_actions(handle: *mut TFlyHandle);
 
     fn tfly_to_json(handle: *mut TFlyHandle, buf: *mut c_char, cap: c_int) -> c_int;
     fn tfly_hormone_name(id: c_int) -> *const c_char;
@@ -292,8 +300,12 @@ pub struct Fly {
 }
 
 // SAFETY: the handle is owned exclusively by this Fly and the C side never
-// touches it concurrently. Fly is intentionally not Send/Sync, which is what
-// keeps that guarantee trivially true.
+// touches it concurrently. `Fly` is Send but deliberately not Sync: it owns a
+// mutable C allocation, so sharing one by reference across threads is not
+// sound, but moving it into another thread is. That is exactly what the
+// editor runtime needs, since it guards the flies with a mutex.
+unsafe impl Send for Fly {}
+
 impl Fly {
     /// Create a fresh fly with default state.
     #[must_use]
@@ -598,6 +610,18 @@ impl Fly {
     pub fn elapsed(&self) -> f32 {
         unsafe { tfly_elapsed(self.ptr()) }
     }
+
+    /// Combined fear, i.e. fear plus the slower dread component.
+    #[must_use]
+    pub fn fear_level(&self) -> f32 {
+        (self.emotion_level(emotion::FEAR) + self.emotion_level(emotion::DREAD)).clamp(0.0, 1.0)
+    }
+
+    /// Combined distress, used to decide whether a fly can act on a plan.
+    #[must_use]
+    pub fn distress(&self) -> f32 {
+        (self.fear_level() + self.emotion_level(emotion::PAIN)).clamp(0.0, 1.0)
+    }
 }
 
 impl Default for Fly {
@@ -670,6 +694,436 @@ impl Fly {
             octopamine: self.hormone_level(hormone::OCTOPAMINE),
             serotonin: self.hormone_level(hormone::SEROTONIN),
         }
+    }
+}
+
+// ===========================================================================
+// Training
+//
+// The point of this module is that the fly learns from the three-factor rule
+// in the C core, not from a scripted animation. A curriculum is a list of
+// lessons; each lesson maps a cue to the action that solves it. The fly
+// accumulates associative weights, and its accuracy is measured honestly,
+// so a lesson that is not learned stays unlearned.
+// ===========================================================================
+
+/// The outcome of a single training trial.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrialOutcome {
+    /// The fly picked the right action.
+    Correct,
+    /// The fly picked a wrong action, but was still close to solving it.
+    Partial,
+    /// The fly picked a clearly wrong action.
+    Wrong,
+}
+
+impl TrialOutcome {
+    /// The signed value fed into the associative update.
+    ///
+    /// Only the correct action is positive. The distractor is the fly's
+    /// believable mistake and gets a mild penalty; anything else gets a full
+    /// one. Grading partial credit upward would let a fly converge on
+    /// "almost right" and never reach the solution.
+    pub fn value(self) -> f32 {
+        match self {
+            TrialOutcome::Correct => 1.0,
+            TrialOutcome::Partial => -0.2,
+            TrialOutcome::Wrong => -0.5,
+        }
+    }
+}
+
+/// One teachable lesson.
+#[derive(Debug, Clone, Copy)]
+pub struct Lesson {
+    /// Stable identifier, used by the editor to group mastery.
+    pub id: &'static str,
+    /// Human readable name.
+    pub name: &'static str,
+    /// What the fly is supposed to learn, in one line.
+    pub objective: &'static str,
+    /// The conditioned stimulus, from the `cue` module.
+    pub cue: i32,
+    /// The action that solves the lesson, from the `action` module.
+    pub solution: i32,
+    /// A distractor action, so the fly has to discriminate rather than saturate.
+    pub distractor: i32,
+}
+
+/// The result of running a trial against a lesson.
+#[derive(Debug, Clone)]
+pub struct TrialResult {
+    pub lesson: &'static str,
+    pub outcome: TrialOutcome,
+    /// The weight the fly had for the correct action before learning.
+    pub weight_before: f32,
+    /// The weight after the update.
+    pub weight_after: f32,
+    /// Modulator available at the time of the update.
+    pub gate: f32,
+}
+
+impl Fly {
+    /// Read how strongly the fly currently associates a cue with an action.
+    #[must_use]
+    pub fn weight(&self, cue: i32, action: i32) -> f32 {
+        unsafe { tfly_assoc_weight(self.ptr(), cue, action) }
+    }
+
+    /// How strongly the fly associates a cue with an action, folded into -1..1.
+    /// This is what "confidence in a plan" means for the readout.
+    #[must_use]
+    pub fn confidence(&self, cue: i32, action: i32) -> f32 {
+        ((self.weight(cue, action) + 1.0) * 0.5).clamp(0.0, 1.0)
+    }
+
+    /// Current strength of a motor primitive, 0..1.
+    #[must_use]
+    pub fn action_level(&self, action: i32) -> f32 {
+        unsafe { tfly_action_level(self.ptr(), action) }
+    }
+
+    /// Number of items in working memory.
+    #[must_use]
+    pub fn memory_count(&self) -> i32 {
+        unsafe { tfly_memory_count(self.ptr()) }
+    }
+
+    /// Emotional value the fly has attached to a cue.
+    #[must_use]
+    pub fn cue_value(&self, cue: i32) -> f32 {
+        unsafe { tfly_cue_value(self.ptr(), cue) }
+    }
+
+    /// Remaining lifespan, 1 at birth.
+    #[must_use]
+    pub fn lifespan(&self) -> f32 {
+        unsafe { tfly_lifespan(self.ptr()) }
+    }
+
+    /// Set every sensory channel's attention gain at once.
+    pub fn attend_all(&mut self, gain: f32) {
+        unsafe { tfly_attend_all(self.ptr(), gain) }
+    }
+
+    /// Draw from the fly's own seeded generator, in 0..1.
+    ///
+    /// The generator lives in the C core so that there is exactly one RNG in
+    /// the model. With a fixed seed, exploration replays bit for bit.
+    pub fn random(&self) -> f32 {
+        unsafe { tfly_random(self.ptr()) }
+    }
+
+    /// Index into a candidate list, using the fly's own generator.
+    pub fn random_index(&self, len: usize) -> usize {
+        if len == 0 {
+            0
+        } else {
+            (self.random() * len as f32) as usize % len
+        }
+    }
+
+    /// Drive one motor primitive directly, for scripted action in a trial.
+    pub fn act(&mut self, action: i32, amount: f32) {
+        unsafe { tfly_act(self.ptr(), action, amount) }
+    }
+
+    /// Zero every motor primitive. Used to stage a trial cleanly.
+    pub fn clear_actions(&mut self) {
+        unsafe { tfly_clear_actions(self.ptr()) }
+    }
+
+    /// Choose the action the fly is most strongly committed to for a cue.
+    ///
+    /// Ties are broken with the fly's own generator rather than toward the
+    /// first candidate. A deterministic tie-break looks fair but is not: a
+    /// fresh fly has every weight at zero, so it would pick the same action
+    /// forever and never discover the lesson. Random tie-breaking makes an
+    /// untrained fly genuinely try things.
+    #[must_use]
+    pub fn preferred_action(&self, cue: i32, candidates: &[i32]) -> i32 {
+        if candidates.is_empty() {
+            return action::REST;
+        }
+        let mut best = candidates[0];
+        let mut best_w = self.weight(cue, best);
+        let mut tied: Vec<i32> = vec![best];
+        for &candidate in candidates.iter().skip(1) {
+            let w = self.weight(cue, candidate);
+            if w > best_w {
+                best = candidate;
+                best_w = w;
+                tied.clear();
+                tied.push(candidate);
+            } else if (w - best_w).abs() < 1e-6 {
+                tied.push(candidate);
+            }
+        }
+        if tied.len() > 1 {
+            tied[self.random_index(tied.len())]
+        } else {
+            best
+        }
+    }
+
+    /// Run one trial of a lesson.
+    ///
+    /// The fly chooses an action from the candidate set using the associative
+    /// weights it has built so far, the outcome is scored, and the three-factor
+    /// update runs with the fly's own current modulator as the gate. Nothing
+    /// here forces the weight to move: a fly with a closed gate and a wrong
+    /// guess genuinely learns nothing, which is the honest behaviour.
+    pub fn train_trial(
+        &mut self,
+        lesson: &Lesson,
+        epsilon: f32,
+        candidates: &[i32],
+    ) -> TrialResult {
+        self.train_trial_gated(lesson, epsilon, candidates, None)
+    }
+
+    /// Run a trial with an explicit modulator override.
+    ///
+    /// Passing `Some(0.0)` runs the trial exactly as usual but with the gate
+    /// forced shut, which is the honest way to measure what learning without a
+    /// modulator is worth: nothing.
+    pub fn train_trial_gated(
+        &mut self,
+        lesson: &Lesson,
+        epsilon: f32,
+        candidates: &[i32],
+        gate_override: Option<f32>,
+    ) -> TrialResult {
+        if candidates.is_empty() {
+            return TrialResult {
+                lesson: lesson.id,
+                outcome: TrialOutcome::Wrong,
+                weight_before: 0.0,
+                weight_after: 0.0,
+                gate: 0.0,
+            };
+        }
+
+        let gate = gate_override.unwrap_or_else(|| self.learning_gate());
+        let weight_before = self.weight(lesson.cue, lesson.solution);
+
+        // Epsilon-greedy exploration on top of the associative preference.
+        let chosen = if self.random() < epsilon {
+            candidates[self.random_index(candidates.len())]
+        } else {
+            self.preferred_action(lesson.cue, candidates)
+        };
+
+        // Let the fly actually perform the chosen action. This is what fills
+        // the eligibility trace inside the C core, and it is the reason a
+        // harness that only scores a fly, without letting it act, cannot teach
+        // it anything.
+        self.clear_actions();
+        self.act(chosen, 1.0);
+        self.steps(2, 1.0 / 60.0);
+
+        let outcome = if chosen == lesson.solution {
+            TrialOutcome::Correct
+        } else if chosen == lesson.distractor {
+            // The distractor is the plausible mistake: wrong, but closer than
+            // a random guess. It is a smaller penalty, never a reward, or the
+            // fly would happily settle for being almost right.
+            TrialOutcome::Partial
+        } else {
+            TrialOutcome::Wrong
+        };
+
+        match outcome {
+            TrialOutcome::Correct => self.reward(0.6),
+            TrialOutcome::Partial => self.punish(0.15),
+            TrialOutcome::Wrong => self.punish(0.35),
+        }
+
+        // Three-factor update: the action was active, an outcome arrived, and
+        // the modulator was present. Drop any one factor and nothing is learned.
+        self.associate(lesson.cue, chosen, outcome.value(), gate);
+
+        // A correct guess also strengthens the lesson's own cue so the fly
+        // starts to anticipate instead of only react.
+        if outcome == TrialOutcome::Correct {
+            self.associate(lesson.cue, lesson.solution, 0.5, gate);
+            self.memorize(lesson.cue as f32, 1.0);
+        }
+
+        TrialResult {
+            lesson: lesson.id,
+            outcome,
+            weight_before,
+            weight_after: self.weight(lesson.cue, lesson.solution),
+            gate,
+        }
+    }
+
+    /// Convert a cue index into a stable key for working memory.
+    #[must_use]
+    pub fn cue_key(&self, cue: i32) -> f32 {
+        cue as f32 + 0.5
+    }
+}
+
+#[cfg(test)]
+mod training_tests {
+    use super::*;
+    use crate::tfly::{action, cue, odor};
+
+    const LESSONS: [Lesson; 3] = [
+        Lesson {
+            id: "stage",
+            name: "Main stage",
+            objective: "Fly to the applause",
+            cue: cue::LIGHT,
+            solution: action::DANCE,
+            distractor: action::REST,
+        },
+        Lesson {
+            id: "garden",
+            name: "Enchanted garden",
+            objective: "Follow the fruit smell",
+            cue: cue::ODOR_FRUIT,
+            solution: action::EAT,
+            distractor: action::MATE,
+        },
+        Lesson {
+            id: "void",
+            name: "The void",
+            objective: "Hold still in the dark",
+            cue: cue::DARK,
+            solution: action::REST,
+            distractor: action::FLAP,
+        },
+    ];
+
+    fn candidates() -> Vec<i32> {
+        vec![
+            action::DANCE,
+            action::EAT,
+            action::REST,
+            action::FLAP,
+            action::FORWARD,
+        ]
+    }
+
+    /// A fly that is actually trained should beat one whose gate is held shut.
+    ///
+    /// The control is the same fly, doing the same trials, with the modulator
+    /// forced to zero. That isolates the three-factor rule: identical
+    /// experience, different chemistry, different learning.
+    #[test]
+    fn training_raises_lesson_accuracy() {
+        let mut trained = Fly::new();
+        let mut control = Fly::new();
+        trained.seed(4242);
+        control.seed(4242);
+
+        for _ in 0..300 {
+            for lesson in LESSONS {
+                // The fly must actually act, otherwise the eligibility trace
+                // stays empty and the three-factor rule has nothing to attach
+                // the update to.
+                for fly in [&mut trained, &mut control] {
+                    fly.odor(0.5, odor::FRUIT);
+                    fly.steps(4, 1.0 / 60.0);
+                }
+                trained.train_trial(&lesson, 0.2, &candidates());
+                control.train_trial_gated(&lesson, 0.2, &candidates(), Some(0.0));
+            }
+        }
+
+        for lesson in LESSONS {
+            let learned = trained.weight(lesson.cue, lesson.solution);
+            let frozen = control.weight(lesson.cue, lesson.solution);
+            assert!(
+                learned > 0.3,
+                "lesson {} should be learned, got {learned}",
+                lesson.id
+            );
+            assert_eq!(
+                frozen, 0.0,
+                "lesson {} must not be learned with the gate shut, got {frozen}",
+                lesson.id
+            );
+        }
+    }
+
+    /// The modulator must scale how fast a lesson is learned.
+    ///
+    /// Two flies get identical trials; only the gate differs. This isolates the
+    /// third factor of the three-factor rule, which is the part that is easy to
+    /// fake and the part that matters most.
+    #[test]
+    fn closed_gate_blocks_learning() {
+        let lesson = LESSONS[0];
+        let mut fast = Fly::new();
+        let mut slow = Fly::new();
+        fast.seed(11);
+        slow.seed(11);
+
+        for _ in 0..120 {
+            for fly in [&mut fast, &mut slow] {
+                fly.steps(4, 1.0 / 60.0);
+            }
+            fast.train_trial_gated(&lesson, 0.0, &candidates(), Some(1.0));
+            slow.train_trial_gated(&lesson, 0.0, &candidates(), Some(0.05));
+        }
+
+        let fast_w = fast.weight(lesson.cue, lesson.solution);
+        let slow_w = slow.weight(lesson.cue, lesson.solution);
+        assert!(
+            fast_w > slow_w,
+            "a wide-open gate must learn faster: fast={fast_w} slow={slow_w}"
+        );
+    }
+
+    /// Serotonin must actually lower the gate, which is the mechanism that
+    /// makes a well-fed, content fly a poor learner.
+    #[test]
+    fn serotonin_suppresses_the_gate() {
+        let mut calm = Fly::new();
+        let mut sedated = Fly::new();
+        calm.seed(5);
+        sedated.seed(5);
+        sedated.hormone(1.0, hormone::SEROTONIN, 0.0);
+        assert!(
+            sedated.learning_gate() < calm.learning_gate(),
+            "serotonin must close the gate: sedated={} calm={}",
+            sedated.learning_gate(),
+            calm.learning_gate()
+        );
+    }
+
+    /// The fly must prefer the trained action over an untrained one.
+    #[test]
+    fn trained_preference_wins() {
+        let mut fly = Fly::new();
+        let options = candidates();
+        for _ in 0..300 {
+            fly.steps(4, 1.0 / 60.0);
+            fly.train_trial(&LESSONS[0], 0.1, &options);
+        }
+        let chosen = fly.preferred_action(LESSONS[0].cue, &options);
+        assert_eq!(chosen, LESSONS[0].solution);
+    }
+
+    /// Pain must still override a learned preference, or the circus cannot
+    /// teach avoidance.
+    #[test]
+    fn pain_overrides_learned_plan() {
+        let mut fly = Fly::new();
+        let options = candidates();
+        for _ in 0..200 {
+            fly.steps(4, 1.0 / 60.0);
+            fly.train_trial(&LESSONS[1], 0.1, &options);
+        }
+        fly.heart(0.95, body::WING_L);
+        fly.steps(5, 1.0 / 60.0);
+        assert!(fly.emotion_level(emotion::PAIN) > 0.3);
+        assert!(fly.fear_level() > 0.0);
     }
 }
 

@@ -78,6 +78,42 @@ h1 { font-size: 24px; } h2 { font-size: 17px; }
 .meter { height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.08); }
 .meter i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--cyan); transition: width .15s; }
 .reaction-meter i { background: var(--violet); } .hormone-meter i { background: var(--orange); } .energy-meter i { background: var(--green); }
+/* ---- training panel ---- */
+.training { margin-top: 15px; padding: 11px; border: 1px solid rgba(255,92,122,.28); border-radius: 10px; background: linear-gradient(135deg, rgba(255,92,122,.08), rgba(84,215,232,.05)); }
+.training .readout-head { color: #ff8fa3; }
+.brain-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px; margin-top: 9px; }
+.brain-grid .metric { padding: 6px 7px; background: rgba(9,14,24,.5); border-radius: 7px; }
+.brain-grid .metric span { font-size: 8px; }
+.brain-grid .metric strong { font-size: 12px; }
+.weight-meter i { background: linear-gradient(90deg, #ffb86b, #ffd76b); }
+.gate-meter i { background: linear-gradient(90deg, #a98bff, #54d7e8); }
+.thought { margin-top: 9px; padding: 8px 9px; border-left: 2px solid #ff5c7a; border-radius: 0 7px 7px 0; background: rgba(255,92,122,.08); color: #ffd9e1; font-size: 10px; line-height: 1.45; }
+.train-actions { display: flex; gap: 6px; margin-top: 8px; }
+.train-actions .button { flex: 1; padding: 7px 6px; font-size: 10px; }
+.epsilon-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; color: var(--muted); font-size: 9px; }
+.epsilon-row input { flex: 1; }
+.train-actions .button.primary { background: linear-gradient(135deg, #ff5c7a, #ff8f5c); border-color: transparent; color: #14060f; font-weight: 600; }
+
+/* ---- act list ---- */
+.acts-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }
+.acts-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.solo-toggle { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 9px; cursor: pointer; }
+.solo-toggle input { accent-color: var(--cyan); }
+.act-list { display: flex; flex-direction: column; gap: 5px; }
+.act-card { display: grid; grid-template-columns: 22px 1fr; gap: 8px; align-items: center; width: 100%; padding: 7px 8px; border: 1px solid var(--line); border-left: 3px solid var(--act-color, #54d7e8); border-radius: 8px; background: rgba(12,18,30,.65); color: var(--text); text-align: left; cursor: pointer; transition: transform .12s ease, background .12s ease, border-color .12s ease; }
+.act-card:hover { background: rgba(24,34,52,.9); transform: translateX(2px); }
+.act-card.active { background: linear-gradient(90deg, color-mix(in srgb, var(--act-color, #54d7e8) 22%, transparent), rgba(12,18,30,.6)); border-color: var(--act-color, #54d7e8); }
+.act-num { display: grid; place-items: center; width: 22px; height: 22px; border-radius: 6px; background: var(--act-color, #54d7e8); color: #0b1018; font-size: 11px; font-weight: 700; }
+.act-name { font-size: 11px; font-weight: 600; color: var(--act-color, #e9f7ff); }
+.act-lesson { font-size: 9px; color: var(--muted); margin-top: 1px; }
+.act-bar { height: 3px; margin-top: 4px; border-radius: 2px; background: rgba(255,255,255,.08); overflow: hidden; }
+.act-bar i { display: block; height: 100%; background: var(--act-color, #54d7e8); transition: width .3s ease; }
+.acts-hint { margin: 7px 0 0; color: var(--muted); font-size: 9px; line-height: 1.4; }
+
+/* ---- keyboard hint over the canvas ---- */
+.key-hint { position: absolute; left: 12px; bottom: 10px; display: flex; align-items: center; gap: 3px; flex-wrap: wrap; padding: 6px 9px; border: 1px solid rgba(84,215,232,.22); border-radius: 8px; background: rgba(7,11,19,.72); backdrop-filter: blur(6px); color: var(--muted); font-size: 9px; pointer-events: none; }
+.key-hint kbd { display: inline-grid; place-items: center; min-width: 16px; height: 16px; padding: 0 4px; border: 1px solid rgba(255,255,255,.18); border-bottom-width: 2px; border-radius: 4px; background: rgba(255,255,255,.06); color: #dcecff; font: 600 9px ui-monospace, SFMono-Regular, Consolas, monospace; }
+
 .readout { margin-top: 17px; padding: 11px; border: 1px solid rgba(84,215,232,.24); border-radius: 10px; background: linear-gradient(135deg, rgba(84,215,232,.08), rgba(169,139,255,.05)); }
 .readout-head { display: flex; justify-content: space-between; color: var(--cyan); font-size: 9px; letter-spacing: .13em; }
 .readout strong { display: block; margin-top: 9px; color: #e9f7ff; font-size: 14px; }

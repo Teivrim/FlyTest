@@ -15,18 +15,45 @@
     <aside class="panel left-panel">
       <div class="panel-heading"><div><span class="eyebrow">AGENTS</span><h2>Мухи</h2></div><button id="add-fly" class="icon-button" title="Добавить муху">+</button></div>
       <div id="fly-list" class="fly-list"></div>
+      <div class="acts-block">
+        <div class="acts-head"><span class="eyebrow">ЦИРК</span><label class="solo-toggle"><input id="solo-mode" type="checkbox"><span>только выбранная</span></label></div>
+        <div id="act-list" class="act-list"></div>
+        <p class="acts-hint">Нажми на номер, чтобы отправить мух в этот акт.</p>
+      </div>
       <div class="legend"><span><i class="dot input"></i>input</span><span><i class="dot output"></i>output</span><span><i class="dot internal"></i>internal</span><span><i class="dot endocrine"></i>endocrine</span></div>
     </aside>
     <section class="scene-panel">
       <div class="scene-toolbar"><div><span class="eyebrow">LIVE SCENE</span><h1>Арена</h1></div><div class="scene-readout"><span id="fps">60 FPS</span><span id="tick">tick 0</span></div></div>
-      <div class="canvas-wrap"><canvas id="arena" aria-label="Сцена виртуального цирка"></canvas><div class="scene-overlay"><span class="scene-chip">SENSOR FIELD</span><span class="scene-chip" id="sim-time">t = 0.00 s</span></div><div id="empty-state" class="empty-state hidden">Выбери муху слева</div></div>
+      <div class="canvas-wrap"><canvas id="arena" aria-label="Сцена виртуального цирка" tabindex="0"></canvas><div class="scene-overlay"><span class="scene-chip">SENSOR FIELD</span><span class="scene-chip" id="sim-time">t = 0.00 s</span></div><div class="key-hint"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> ходить · <kbd>Q</kbd><kbd>E</kbd> высота · <kbd>Shift</kbd> бег · <kbd>1</kbd>–<kbd>5</kbd> акты · <kbd>C</kbd> в центр · мышь — облёт</div><div id="empty-state" class="empty-state hidden">Выбери муху слева</div></div>
       <div class="timeline"><div class="timeline-label"><span>СИГНАЛ</span><span>РЕАКЦИЯ</span><span>ГОРМОН</span></div><div class="timeline-track"><div id="signal-bar" class="timeline-bar signal"></div><div id="reaction-bar" class="timeline-bar reaction"></div><div id="hormone-bar" class="timeline-bar hormone"></div></div></div>
     </section>
     <aside class="panel right-panel">
       <div class="panel-heading"><div><span class="eyebrow">INSPECTOR</span><h2 id="selected-name">Fly</h2></div><span id="selected-channel" class="tag">—</span></div>
       <div class="inspector-grid"><div class="metric"><span>INPUT</span><strong id="input-value">0.00</strong><div class="meter"><i id="input-meter"></i></div></div><div class="metric"><span>REACTION</span><strong id="reaction-value">0.00</strong><div class="meter"><i id="reaction-meter"></i></div></div><div class="metric"><span>NT / HORMONE</span><strong id="nt-value">—</strong><div class="meter hormone-meter"><i id="hormone-meter"></i></div></div><div class="metric"><span>ENERGY</span><strong id="energy-value">0.00</strong><div class="meter energy-meter"><i id="energy-meter"></i></div></div></div>
       <div class="readout"><div class="readout-head"><span>MODEL READOUT</span><span id="confidence">confidence 0%</span></div><strong id="drive">explore</strong><p id="decision">maintain_course</p><small id="attention">odor 50% · light 50% · touch 0%</small></div>
-      <div class="adventure"><div class="readout-head"><span>DIGITAL CIRCUS</span><span id="adventure-score">score 0</span></div><strong id="adventure-name">Свободный полёт</strong><p id="adventure-objective">Исследуй арену</p><progress id="adventure-progress" max="1" value="1"></progress><select id="adventure-select"><option value="free_flight">Свободный полёт</option><option value="odor_trail">Охота за запахом</option><option value="ring_circuit">Кольцо арены</option><option value="hormone_calibration">Калибровка гормонов</option></select></div>
+      <div class="training">
+        <div class="readout-head"><span>ОБУЧЕНИЕ</span><span id="brain-level">ур. 1</span></div>
+        <div class="thought" id="brain-thought">муха ещё ничего не пробовала</div>
+        <div class="brain-grid">
+          <div class="metric"><span>МАСТЕРСТВО</span><strong id="brain-mastery">0%</strong><div class="meter"><i id="brain-mastery-meter"></i></div></div>
+          <div class="metric"><span>ВЕС СВЯЗИ</span><strong id="brain-weight">0%</strong><div class="meter weight-meter"><i id="brain-weight-meter"></i></div></div>
+          <div class="metric"><span>ГЕЙТ</span><strong id="brain-gate">0%</strong><div class="meter gate-meter"><i id="brain-gate-meter"></i></div></div>
+          <div class="metric"><span>ПЛАСТИЧНОСТЬ</span><strong id="brain-plasticity">0%</strong><div class="meter"><i id="brain-plasticity-meter"></i></div></div>
+        </div>
+        <div class="learning-strip"><span>проб <b id="brain-trials">0</b></span><span>верно <b id="brain-correct">0</b></span><span>xp <b id="brain-xp">0</b></span><span>память <b id="brain-memory">0</b></span></div>
+        <div class="learning-strip"><span>настроение <b id="brain-mood">—</b></span><span>потребность <b id="brain-drive">—</b></span><span>последнее <b id="brain-outcome">—</b></span></div>
+        <div class="train-actions">
+          <button id="train-burst" class="button primary">Тренировать 200</button>
+          <button id="training-toggle" class="button">Авто: ВКЛ</button>
+        </div>
+        <div class="train-actions">
+          <button id="brain-hurt" class="button">Боль</button>
+          <button id="brain-dopamine" class="button">Допамин</button>
+          <button id="brain-unlearn" class="button">Забыть</button>
+        </div>
+        <label class="epsilon-row"><span>Любопытство (ε)</span><input id="epsilon" type="range" min="0" max="1" step="0.05" value="0.25"></label>
+      </div>
+      <div class="adventure"><div class="readout-head"><span>ПРИКЛЮЧЕНИЕ</span><span id="adventure-score">score 0</span></div><strong id="adventure-name">Свободный полёт</strong><p id="adventure-objective">Исследуй арену</p><progress id="adventure-progress" max="1" value="1"></progress><select id="adventure-select"><option value="free_flight">Свободный полёт</option><option value="odor_trail">Охота за запахом</option><option value="ring_circuit">Кольцо арены</option><option value="hormone_calibration">Калибровка гормонов</option></select></div>
       <div class="adventure-actions"><button id="reward-button" class="button">Награда</button><button id="puff-button" class="button">Puff</button></div>
       <div class="learning-strip"><span>strategy <b id="strategy-value">balanced</b></span><span>reward <b id="reward-value">0%</b></span><span>novelty <b id="novelty-value">0%</b></span></div>
       <div class="learning-strip"><span>puffs <b id="puff-value">0</b></span><span>learn updates <b id="learning-value">0</b></span></div>

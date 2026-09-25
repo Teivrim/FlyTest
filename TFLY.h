@@ -847,10 +847,20 @@ static inline void TReward(TFLY *fly, float amount) {
     fly->emotion[T_EMO_PRIDE] = TClamp(fly->emotion[T_EMO_PRIDE] + 0.5f * v, 0.0f, 1.0f);
 }
 
+/*
+ * Aversion. This releases octopamine, not serotonin.
+ *
+ * Serotonin would be the intuitive choice, but in this model serotonin is the
+ * satiety signal and it suppresses the learning gate. Using it here creates a
+ * doom loop: a fly that guesses wrong gets punished, the gate closes, and a
+ * closed gate means it can never learn to stop guessing wrong. Punishment has
+ * to open the gate for avoidance learning to be possible at all, which is also
+ * what octopamine does in the real insect system.
+ */
 static inline void TPunish(TFLY *fly, float amount) {
     if (fly == NULL) return;
     float v = TClamp(amount, 0.0f, 1.0f);
-    TEmit(fly, T_H_SEROTONIN, v);
+    TEmit(fly, T_H_OCTOPAMINE, v);
     fly->emotion[T_EMO_SADNESS] = TClamp(fly->emotion[T_EMO_SADNESS] + v, 0.0f, 1.0f);
     fly->emotion[T_EMO_JOY] *= (1.0f - 0.6f * v);
     fly->stress = TClamp(fly->stress + 0.2f * v, 0.0f, 1.0f);

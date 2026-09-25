@@ -130,6 +130,26 @@ float tfly_vertical_out(TFlyHandle *h) { return h->out_vertical; }
 float tfly_wingbeat(TFlyHandle *h) { return h->out_wingbeat; }
 float tfly_elapsed(TFlyHandle *h) { return h->t; }
 
+/* training helpers: the editor needs to read the fly's action preference and
+ * its memory occupancy in order to run three-factor trials */
+float tfly_action_level(TFlyHandle *h, int a) { return h->action[TClampIdx(a, TFLY_N_ACTION)]; }
+int tfly_memory_count(TFlyHandle *h) { return h->memory_n; }
+float tfly_cue_value(TFlyHandle *h, int c) { return h->cue_value[TClampIdx(c, TFLY_N_CUE)]; }
+float tfly_lifespan(TFlyHandle *h) { return h->lifespan; }
+void tfly_attend_all(TFlyHandle *h, float gain) {
+    for (int i = 0; i < TFLY_N_SENSORY; i++) TAttention(h, i, gain);
+}
+
+/* Draw from the fly's own seeded generator, so exploration replays exactly
+ * when the seed is fixed. Kept in C so there is a single RNG in the model. */
+float tfly_random(TFlyHandle *h) { return TRand(h); }
+
+void tfly_act(TFlyHandle *h, int a, float amount) { TAct(h, a, amount); }
+
+void tfly_clear_actions(TFlyHandle *h) {
+    for (int i = 0; i < TFLY_N_ACTION; i++) h->action[i] = 0.0f;
+}
+
 int tfly_to_json(TFlyHandle *h, char *buf, int cap) { return TToJson(h, buf, cap); }
 
 const char *tfly_hormone_name(int id) { return TFlyHormoneName(id); }
