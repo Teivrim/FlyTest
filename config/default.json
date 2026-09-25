@@ -1,0 +1,15 @@
+{
+  "data_dir_env": "FLYTEST_DATA_DIR",
+  "database_env": "FLYTEST_DB",
+  "default_data_dir": "data/flywire/fafb-v783",
+  "runtime": {
+    "ticks": 600,
+    "dt": 0.0166667,
+    "seed": 7,
+    "events": "runtime-output/events.jsonl"
+  },
+  "blender": {
+    "bridge": "blender/flytest_bridge.py",
+    "fps": 60
+  }
+}

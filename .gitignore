@@ -1,0 +1,12 @@
+/target
+/data/**/*.csv.gz
+/data/**/*.part
+/data/**/*.sqlite
+/data/**/*.sqlite-shm
+/data/**/*.sqlite-wal
+/data/**/*.building-*
+__pycache__/
+*.py[cod]
+runtime-output/
+*.blend1
+*.blend2
