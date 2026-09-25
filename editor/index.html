@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlyEditor — Digital Circus</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">✦</span><div><strong>FlyEditor</strong><small>digital circus runtime</small></div></div>
+    <div class="top-actions"><span id="connection" class="pill offline">● offline</span><button id="pause" class="button primary">Пауза</button><button id="reset" class="button">Сброс</button></div>
+  </header>
+  <main class="workspace">
+    <aside class="panel left-panel">
+      <div class="panel-heading"><div><span class="eyebrow">AGENTS</span><h2>Мухи</h2></div><button id="add-fly" class="icon-button" title="Добавить муху">+</button></div>
+      <div id="fly-list" class="fly-list"></div>
+      <div class="legend"><span><i class="dot input"></i>input</span><span><i class="dot output"></i>output</span><span><i class="dot internal"></i>internal</span><span><i class="dot endocrine"></i>endocrine</span></div>
+    </aside>
+    <section class="scene-panel">
+      <div class="scene-toolbar"><div><span class="eyebrow">LIVE SCENE</span><h1>Арена</h1></div><div class="scene-readout"><span id="fps">60 FPS</span><span id="tick">tick 0</span></div></div>
+      <div class="canvas-wrap"><canvas id="arena" aria-label="Сцена виртуального цирка"></canvas><div class="scene-overlay"><span class="scene-chip">SENSOR FIELD</span><span class="scene-chip" id="sim-time">t = 0.00 s</span></div><div id="empty-state" class="empty-state hidden">Выбери муху слева</div></div>
+      <div class="timeline"><div class="timeline-label"><span>СИГНАЛ</span><span>РЕАКЦИЯ</span><span>ГОРМОН</span></div><div class="timeline-track"><div id="signal-bar" class="timeline-bar signal"></div><div id="reaction-bar" class="timeline-bar reaction"></div><div id="hormone-bar" class="timeline-bar hormone"></div></div></div>
+    </section>
+    <aside class="panel right-panel">
+      <div class="panel-heading"><div><span class="eyebrow">INSPECTOR</span><h2 id="selected-name">Fly</h2></div><span id="selected-channel" class="tag">—</span></div>
+      <div class="inspector-grid"><div class="metric"><span>INPUT</span><strong id="input-value">0.00</strong><div class="meter"><i id="input-meter"></i></div></div><div class="metric"><span>REACTION</span><strong id="reaction-value">0.00</strong><div class="meter"><i id="reaction-meter"></i></div></div><div class="metric"><span>NT / HORMONE</span><strong id="nt-value">—</strong><div class="meter hormone-meter"><i id="hormone-meter"></i></div></div><div class="metric"><span>ENERGY</span><strong id="energy-value">0.00</strong><div class="meter energy-meter"><i id="energy-meter"></i></div></div></div>
+      <div class="control-block"><label>Simulation speed <output id="speed-value">1.00×</output></label><input id="speed" type="range" min="0.1" max="3" step="0.05" value="1"></div>
+      <div class="control-block"><label>Reaction decay <output id="decay-value">0.85</output></label><input id="decay" type="range" min="0" max="1" step="0.01" value="0.85"></div>
+      <div class="toggle-row"><span>Гормональный выброс</span><button id="hormone-toggle" class="toggle">ON</button></div>
+      <div class="inspector-note"><span class="note-icon">i</span><p>FlyEditor использует лёгкую политику для realtime. Для FlyWire/внешней модели используй JSONL runtime и Blender bridge.</p></div>
+      <button id="open-bridge" class="button wide">Открыть Blender bridge</button>
+      <div class="endpoint">http://127.0.0.1:8765/api/state</div>
+    </aside>
+  </main>
+  <footer class="statusbar"><span><i class="status-light"></i><span id="status-text">Ожидание runtime…</span></span><span>fixed timestep 16.67 ms · max 8 agents</span><span id="model-label">model: lightweight-policy</span></footer>
+  <script src="/app.js"></script>
+</body>
+</html>

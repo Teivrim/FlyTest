@@ -1,4 +1,5 @@
 pub mod biology;
+pub mod editor;
 pub mod flywire;
 pub mod index;
 pub mod runtime;

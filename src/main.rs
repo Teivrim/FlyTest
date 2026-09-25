@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use flytest::biology;
+use flytest::editor;
 use flytest::flywire::{
     self, ConnectionPage, DEFAULT_DATA_DIR, Direction, NeuronDetails, NeuronDirection,
 };
@@ -36,6 +37,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Launch the optimized local FlyEditor web interface.
+    Editor {
+        #[arg(long, default_value_t = editor::DEFAULT_PORT, value_name = "PORT")]
+        port: u16,
+        #[arg(long, default_value_t = editor::DEFAULT_FLIES, value_name = "N")]
+        flies: usize,
+    },
     /// Run the self-contained virtual fly loop and optionally write JSONL events.
     Circus {
         #[arg(long, default_value_t = 600, value_name = "N")]
@@ -250,6 +258,9 @@ fn main() -> Result<()> {
     let database = resolve_database(data_dir, cli.db.as_deref());
 
     match cli.command.unwrap_or(Command::Summary) {
+        Command::Editor { port, flies } => {
+            editor::serve(port, flies)?;
+        }
         Command::Circus {
             ticks,
             dt,

@@ -19,7 +19,18 @@ FlyTest — локальный цифровой цирк для виртуаль
 - нормализация нейромедиаторов, нейропептидов и гормональных стандартов;
 - эвристический `signal → reaction → signal` по структурному графу.
 
-## Быстрый запуск цирка
+## FlyEditor
+
+Запусти графический редактор:
+
+```bash
+cargo run --release -- editor --port 8765 --flies 3
+```
+
+Открой `http://127.0.0.1:8765`. В центре — арена с 2–3 мухами; слева — список агентов, справа — input/reaction/hormone/energy inspector и управление скоростью/decay. Runtime работает на fixed timestep 60 Hz, использует лёгкую политику и не пишет каждый кадр в SQLite/JSONL. Это режим, рассчитанный на 2–3 мух на текущем ПК.
+
+FlyEditor не запускает полный FlyWire-граф в каждом тике: для него используется облегчённый realtime-адаптер. Полный граф подключается через `circus --model flywire` и Blender bridge.
+
 
 ```bash
 cargo run --release -- circus --ticks 600 --output runtime-output/events.jsonl
