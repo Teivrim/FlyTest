@@ -3,6 +3,7 @@ pub mod editor;
 pub mod flywire;
 pub mod index;
 pub mod runtime;
+pub mod tfly;
 
 pub use flywire::{
     ConnectionPage, DatasetSummary, Direction, Manifest, NeuronDetails, NeuronDirection,

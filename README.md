@@ -19,6 +19,52 @@ FlyTest — локальный цифровой цирк для виртуаль
 - нормализация нейромедиаторов, нейропептидов и гормональных стандартов;
 - эвристический `signal → reaction → signal` по структурному графу.
 
+## TFLY.h: ядро модели
+
+[`TFLY.h`](TFLY.h) — single-header C-библиотека со всей моделью мухи: сенсоры,
+боль, гормоны, эмоции, потребности, память, обучение, сон, социальные сигналы.
+Никаких зависимостей, кроме libc и libm. Подключается одним `#include`.
+
+```c
+#include "TFLY.h"
+
+TFLY fly;
+TNew(&fly);
+TSeed(&fly, 7);
+
+TLight(&fly, 0.6f);
+TOdor(&fly, 0.5f, T_ODOR_FRUIT);
+THeart(&fly, 0.8f, T_BODY_WING_L);   // боль в левом крыле
+THormone(&fly, 0.4f, T_H_DOPAMINE, 2.0f);
+TUpdate(&fly, 1.0f / 60.0f);
+
+TPrintState(&fly);
+```
+
+Ключевые вызовы:
+
+- `THeart(x, region)` — боль с локализацией по частям тела, рефлекс испуга и страх;
+- `THormone(x, hormone, z)` — введение гормона, `z > 0` болюс, `z <= 0` тонический;
+- `TAssociate(cue, action, outcome, modulator)` — трёхфакторное обучение;
+- `TEmotion`/`TFear`/`TJoy` — прямое выставление аффекта для экспериментов.
+
+Проверка и демо:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_tfly.ps1
+```
+
+CLI через Rust-обвязку:
+
+```bash
+cargo run --release -- tfly --scenario learn
+cargo run --release -- tfly --scenario pain --trace 2
+cargo run --release -- tfly --scenario social
+```
+
+Архитектура, ответ на вопрос «давать ли модели только входы» и план развития —
+в [`docs/tfly-design.md`](docs/tfly-design.md).
+
 ## FlyEditor
 
 Запусти графический редактор:
@@ -156,4 +202,5 @@ cargo check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 python -m py_compile blender/flytest_bridge.py models/example_policy.py
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run_tfly.ps1
 ```

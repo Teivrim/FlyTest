@@ -44,6 +44,18 @@ enum Command {
         #[arg(long, default_value_t = editor::DEFAULT_FLIES, value_name = "N")]
         flies: usize,
     },
+    /// Drive the TFLY.h C core through a scripted scenario.
+    Tfly {
+        /// Which scenario to run.
+        #[arg(long, default_value = "learn", value_name = "NAME")]
+        scenario: String,
+        /// Stimulus RNG seed. The same seed replays identically.
+        #[arg(long, default_value_t = 7, value_name = "N")]
+        seed: u32,
+        /// Print the state every N seconds instead of only at the end.
+        #[arg(long, default_value_t = 0.0, value_name = "SECONDS")]
+        trace: f32,
+    },
     /// Run the self-contained virtual fly loop and optionally write JSONL events.
     Circus {
         #[arg(long, default_value_t = 600, value_name = "N")]
@@ -358,6 +370,18 @@ fn main() -> Result<()> {
                 print_json(&report)?;
             } else {
                 print_import(&report);
+            }
+        }
+        Command::Tfly {
+            scenario,
+            seed,
+            trace,
+        } => {
+            let report = run_tfly(&scenario, seed, trace)?;
+            if cli.json {
+                print_json(&report)?;
+            } else {
+                print_tfly(&report);
             }
         }
         Command::Stats => {
@@ -701,6 +725,172 @@ fn print_import(report: &index::ImportReport) {
     println!("connection rows: {}", report.connection_rows);
     println!("synapses: {}", report.synapse_count);
     println!("database size: {} bytes", report.database_bytes);
+}
+
+/// A single observation of the fly during a scripted scenario.
+#[derive(Debug, Serialize)]
+struct TflyFrame {
+    seconds: f32,
+    mood: String,
+    drive: String,
+    valence: f32,
+    arousal: f32,
+    energy: f32,
+    stress: f32,
+    pain: f32,
+    learning_gate: f32,
+    fear: f32,
+    joy: f32,
+    curiosity: f32,
+    hunger: f32,
+    thrust: f32,
+    turn: f32,
+    wingbeat: f32,
+    note: String,
+}
+
+#[derive(Debug, Serialize)]
+struct TflyReport {
+    scenario: String,
+    seed: u32,
+    core: String,
+    struct_bytes: i32,
+    frames: Vec<TflyFrame>,
+    learned_weight: f32,
+    control_weight: f32,
+    json: String,
+}
+
+/// Run one of the built-in scenarios against the TFLY C core.
+fn run_tfly(scenario: &str, seed: u32, trace: f32) -> Result<TflyReport> {
+    use flytest::tfly::{Fly, action, body, cue, emotion};
+
+    let mut fly = Fly::new();
+    fly.seed(seed);
+    let mut frames: Vec<TflyFrame> = Vec::new();
+    let dt = 1.0 / 60.0;
+
+    let sample = |fly: &Fly, seconds: f32, note: &str, frames: &mut Vec<TflyFrame>| {
+        // Labelled samples are always recorded. `--trace` adds a periodic
+        // sample every N simulated seconds on top of them.
+        let labelled = frames.last().map(|f: &TflyFrame| f.note.as_str()) != Some(note);
+        let periodic = trace > 0.0 && (seconds / trace - frames.len() as f32) >= 1.0;
+        if labelled || periodic {
+            frames.push(TflyFrame {
+                seconds,
+                mood: fly.dominant_emotion().to_owned(),
+                drive: fly.dominant_drive().to_owned(),
+                valence: fly.valence(),
+                arousal: fly.arousal(),
+                energy: fly.energy(),
+                stress: fly.stress(),
+                pain: fly.pain_total(),
+                learning_gate: fly.learning_gate(),
+                fear: fly.emotion_level(emotion::FEAR),
+                joy: fly.emotion_level(emotion::JOY),
+                curiosity: fly.emotion_level(emotion::CURIOSITY),
+                hunger: fly.drive_level(flytest::tfly::drive::HUNGER),
+                thrust: fly.out_thrust(),
+                turn: fly.out_turn(),
+                wingbeat: fly.wingbeat(),
+                note: note.to_owned(),
+            });
+        }
+    };
+
+    match scenario {
+        // Does the fly form an association, and does the modulator matter?
+        "learn" => {
+            for trial in 0..40 {
+                fly.odor(0.6, flytest::tfly::odor::FRUIT);
+                fly.steps(20, dt);
+                sample(&fly, fly.elapsed(), &format!("trial {trial}"), &mut frames);
+                fly.taste(0.8, 0.0, 0.0, 0.0);
+                fly.reward(0.6);
+                fly.associate(cue::ODOR_FRUIT, action::FORWARD, 1.0, fly.learning_gate());
+                fly.steps(20, dt);
+            }
+        }
+        // Can a shock override an appetitive drive?
+        "pain" => {
+            fly.odor(0.7, flytest::tfly::odor::FLOWER);
+            fly.steps(600, dt);
+            sample(&fly, fly.elapsed(), "before injury", &mut frames);
+            fly.heart(0.9, body::WING_L);
+            fly.steps(120, dt);
+            sample(&fly, fly.elapsed(), "after wing injury", &mut frames);
+        }
+        // Does fear suppress courtship, and does recovery restore it?
+        "social" => {
+            fly.mate_signal(1.0);
+            fly.steps(300, dt);
+            sample(&fly, fly.elapsed(), "mate present", &mut frames);
+            fly.predator_signal(1.0);
+            fly.steps(120, dt);
+            sample(&fly, fly.elapsed(), "predator appears", &mut frames);
+            fly.heal_all();
+            fly.contentment(0.6);
+            fly.steps(600, dt);
+            sample(&fly, fly.elapsed(), "recovered", &mut frames);
+        }
+        other => bail!("unknown tfly scenario {other:?}; try learn, pain or social"),
+    }
+
+    // control: identical trials with the modulator removed must learn nothing
+    let mut control = Fly::new();
+    control.seed(seed);
+    for _ in 0..40 {
+        control.odor(0.6, flytest::tfly::odor::FRUIT);
+        control.steps(20, dt);
+        control.associate(cue::ODOR_FRUIT, action::FORWARD, 1.0, 0.0);
+        control.steps(20, dt);
+    }
+
+    Ok(TflyReport {
+        scenario: scenario.to_owned(),
+        seed,
+        core: format!(
+            "TFLY.h v{}.{} ({} bytes of state per fly)",
+            flytest::tfly::VERSION_MAJOR,
+            flytest::tfly::VERSION_MINOR,
+            Fly::struct_size()
+        ),
+        struct_bytes: Fly::struct_size(),
+        frames,
+        learned_weight: fly.assoc_weight(cue::ODOR_FRUIT, action::FORWARD),
+        control_weight: control.assoc_weight(cue::ODOR_FRUIT, action::FORWARD),
+        json: fly.to_json(),
+    })
+}
+
+fn print_tfly(report: &TflyReport) {
+    println!("{}", report.core);
+    println!("scenario: {}  seed: {}", report.scenario, report.seed);
+    if !report.frames.is_empty() {
+        println!(
+            "\n  {:>7}  {:<11}  {:<9}  {:>7}  {:>6}  {:>6}  note",
+            "t", "mood", "drive", "valence", "thrust", "turn"
+        );
+        for frame in &report.frames {
+            println!(
+                "  {:>6.1}s  {:<11}  {:<9}  {:>+7.3}  {:>6.3}  {:>+6.3}  {}",
+                frame.seconds,
+                frame.mood,
+                frame.drive,
+                frame.valence,
+                frame.thrust,
+                frame.turn,
+                frame.note
+            );
+        }
+    }
+    println!("\nassociative weight fruit -> forward");
+    println!("  with modulator:    {:+.4}", report.learned_weight);
+    println!(
+        "  control, gate = 0: {:+.4}  (must be 0.0000)",
+        report.control_weight
+    );
+    println!("\nstate: {}", report.json);
 }
 
 fn print_stats(stats: &index::NetworkStats) {

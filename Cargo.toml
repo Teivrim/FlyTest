@@ -15,4 +15,7 @@ sha2 = "0.10"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [lints.rust]
-unsafe_code = "forbid"
+# The TFLY bindings in src/tfly.rs call into a C core, which requires `unsafe`.
+# That module opts in locally with #[allow(unsafe_code)]; the rest of the crate
+# still treats unsafe as a hard error.
+unsafe_code = "deny"
