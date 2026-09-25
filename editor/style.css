@@ -92,6 +92,26 @@ h1 { font-size: 24px; } h2 { font-size: 17px; }
 .train-actions .button { flex: 1; padding: 7px 6px; font-size: 10px; }
 .epsilon-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; color: var(--muted); font-size: 9px; }
 .epsilon-row input { flex: 1; }
+
+/* ---- learning curve + event log ---- */
+.curve-block { margin-top: 11px; }
+.curve { display: block; width: 100%; height: 46px; margin-top: 6px; border: 1px solid var(--line); border-radius: 6px; background: rgba(9,14,24,.55); }
+.curve-legend { display: flex; gap: 9px; margin-top: 4px; color: var(--muted); font-size: 8px; }
+.swatch { display: inline-block; width: 8px; height: 2px; margin-right: 3px; vertical-align: middle; }
+.swatch.mastery { background: #ff5c7a; }
+.swatch.accuracy { background: #6ee7a8; }
+.swatch.gate { background: #a98bff; }
+.log-block { margin-top: 12px; }
+.log-list { max-height: 150px; margin: 6px 0 0; padding: 0; overflow-y: auto; list-style: none; }
+.log-list li { display: grid; grid-template-columns: 46px 1fr; gap: 6px; padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,.04); color: var(--muted); font-size: 9px; line-height: 1.35; }
+.log-list li time { color: #5d738f; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.log-list li span { color: var(--text); }
+.log-list li.mastered span { color: #6ee7a8; }
+.log-list li.forgot span { color: #ffb86b; }
+.log-list li.level_up span { color: #ffd76b; }
+.log-list li.pain span { color: #ff5c7a; }
+.log-list li.act span { color: #54d7e8; }
+.button.small { margin-top: 6px; padding: 5px 8px; font-size: 9px; }
 .train-actions .button.primary { background: linear-gradient(135deg, #ff5c7a, #ff8f5c); border-color: transparent; color: #14060f; font-weight: 600; }
 
 /* ---- act list ---- */

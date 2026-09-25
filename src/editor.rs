@@ -83,7 +83,35 @@ pub struct AdventureSnapshot {
     pub target: [f32; 2],
 }
 
-/// Training state of one fly, surfaced in the inspector.
+/// One notable thing that happened, kept so progress is auditable after the
+/// fact rather than only observable in the instant.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEntry {
+    /// Simulated seconds since the runtime started.
+    pub t: f32,
+    /// Which fly it was about, or 0 for the whole troupe.
+    pub fly: u32,
+    /// Machine-readable kind, e.g. `level_up`, `mastered`, `pain`.
+    pub kind: String,
+    /// Human readable line.
+    pub text: String,
+}
+
+/// A point on the selected fly's mastery curve.
+#[derive(Debug, Clone, Serialize)]
+pub struct CurvePoint {
+    pub trial: u32,
+    pub mastery: f32,
+    pub weight: f32,
+    pub gate: f32,
+    pub accuracy: f32,
+}
+
+/// How much history to keep per fly and in the shared log.
+const HISTORY_LEN: usize = 240;
+const LOG_LEN: usize = 60;
+/// Minimum sim time between two level-up lines for the same fly.
+const LEVEL_LOG_INTERVAL: f32 = 3.0;
 #[derive(Debug, Clone, Serialize)]
 pub struct BrainSnapshot {
     pub act: String,
@@ -106,6 +134,8 @@ pub struct BrainSnapshot {
     pub memory: i32,
     pub last_lesson: String,
     pub last_outcome: String,
+    /// Rolling mastery samples for the sparkline.
+    pub curve: Vec<CurvePoint>,
 }
 
 /// One act in the act list, with the current fly's progress on it.
@@ -134,6 +164,10 @@ pub struct TrainingSnapshot {
     pub total_trials: u64,
     pub total_correct: u64,
     pub average_mastery: f32,
+    /// Shared event log, newest last.
+    pub log: Vec<LogEntry>,
+    /// Where the JSONL mirror is being written, if anywhere.
+    pub log_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -533,6 +567,11 @@ pub struct EditorRuntime {
     /// Aggregated across every fly, for the headline numbers.
     total_trials: u64,
     total_correct: u64,
+    /// Recent notable events, newest last.
+    log: std::collections::VecDeque<LogEntry>,
+    /// Optional JSONL sink, so a session can be analysed after the fact.
+    log_file: Option<std::fs::File>,
+    log_path: Option<std::path::PathBuf>,
 }
 
 /// Per-fly training bookkeeping, on top of the C brain's own weights.
@@ -550,10 +589,21 @@ struct Brain {
     last_outcome: &'static str,
     /// A short, readable trace of what the fly was weighing up.
     thought: String,
+    /// Rolling mastery samples, so a curve can be drawn without keeping every
+    /// trial forever.
+    history: std::collections::VecDeque<CurvePoint>,
+    /// Per-act flags, so a "mastered" event is logged once rather than on
+    /// every trial after saturation.
+    mastered: [bool; 5],
+    /// The fly's id, needed to write log lines from inside the brain.
+    id: u32,
+    /// Sim time of the last level-up line, so a burst that crosses many levels
+    /// at once does not flood the log.
+    last_level_log: f32,
 }
 
 impl Brain {
-    fn new(seed: u32) -> Self {
+    fn new(seed: u32, id: u32) -> Self {
         let mut fly = tfly::Fly::new();
         fly.seed(seed);
         Self {
@@ -566,6 +616,10 @@ impl Brain {
             last_lesson: "",
             last_outcome: "ожидание",
             thought: "муха ещё ничего не пробовала".to_owned(),
+            history: std::collections::VecDeque::with_capacity(HISTORY_LEN),
+            mastered: [false; 5],
+            id,
+            last_level_log: f32::NEG_INFINITY,
         }
     }
 
@@ -582,7 +636,18 @@ impl Brain {
     }
 
     /// Fold a trial result into the fly's statistics and rewrite its trace.
-    fn record(&mut self, act: &Act, result: &tfly::TrialResult) {
+    ///
+    /// Returns any notable events so the caller can put them in the shared
+    /// log. The brain itself does not own the log, because the log is a
+    /// property of the runtime, not of one fly.
+    fn record(
+        &mut self,
+        act: &Act,
+        act_index: usize,
+        result: &tfly::TrialResult,
+        now: f32,
+    ) -> Vec<LogEntry> {
+        let mut events = Vec::new();
         self.trials = self.trials.saturating_add(1);
         let hit = result.outcome == tfly::TrialOutcome::Correct;
         if hit {
@@ -591,7 +656,21 @@ impl Brain {
         } else {
             self.xp = self.xp.saturating_add(2);
         }
-        self.level = 1 + self.xp / 100;
+        let new_level = 1 + self.xp / 100;
+        // A training burst can cross a dozen levels inside a single frame.
+        // Logging each one buries every other event, so level-ups are rate
+        // limited to one line per interval. The level a burst actually reached
+        // is reported by the caller on its training line instead.
+        if new_level > self.level && now - self.last_level_log >= LEVEL_LOG_INTERVAL {
+            self.last_level_log = now;
+            events.push(LogEntry {
+                t: 0.0,
+                fly: self.id,
+                kind: "level_up".to_owned(),
+                text: format!("уровень {new_level}"),
+            });
+        }
+        self.level = new_level;
         // Smoothed, so a single bad trial does not erase progress.
         self.mastery = self.mastery * 0.9 + f32::from(hit) * 0.1;
         self.last_lesson = act.id;
@@ -600,7 +679,44 @@ impl Brain {
             tfly::TrialOutcome::Partial => "почти",
             tfly::TrialOutcome::Wrong => "ошибка",
         };
+
+        // Log the moment a lesson is actually mastered, once.
+        let weight = self.fly.weight(act.cue, act.solution);
+        if act_index < self.mastered.len() {
+            if !self.mastered[act_index] && weight >= 0.9 {
+                self.mastered[act_index] = true;
+                events.push(LogEntry {
+                    t: 0.0,
+                    fly: self.id,
+                    kind: "mastered".to_owned(),
+                    text: format!("освоила «{}»", act.lesson),
+                });
+            } else if self.mastered[act_index] && weight < 0.5 {
+                self.mastered[act_index] = false;
+                events.push(LogEntry {
+                    t: 0.0,
+                    fly: self.id,
+                    kind: "forgot".to_owned(),
+                    text: format!("забыла «{}»", act.lesson),
+                });
+            }
+        }
+
+        // Sample the curve. Every trial would be far more data than the
+        // sparkline can show, and the interesting shape is the trend.
+        self.history.push_back(CurvePoint {
+            trial: self.trials,
+            mastery: weight.clamp(0.0, 1.0),
+            weight,
+            gate: self.fly.learning_gate(),
+            accuracy: self.correct as f32 / self.trials.max(1) as f32,
+        });
+        while self.history.len() > HISTORY_LEN {
+            self.history.pop_front();
+        }
+
         self.thought = self.compose_thought(act);
+        events
     }
 
     /// Compose the readable inner trace.
@@ -707,7 +823,7 @@ impl EditorRuntime {
             adventure_score: 0,
             adventure_target: [0.0, 0.0],
             brains: (0..count)
-                .map(|index| Brain::new(0x5EED + index as u32))
+                .map(|index| Brain::new(0x5EED + index as u32, index as u32 + 1))
                 .collect(),
             acts: vec![0; count],
             current_act: 0,
@@ -717,6 +833,25 @@ impl EditorRuntime {
             training: true,
             total_trials: 0,
             total_correct: 0,
+            log: std::collections::VecDeque::with_capacity(LOG_LEN),
+            log_file: None,
+            log_path: None,
+        }
+    }
+
+    /// Record an event, keep it in memory, and mirror it to the JSONL sink.
+    fn log(&mut self, mut entry: LogEntry) {
+        entry.t = self.time;
+        if let Some(file) = self.log_file.as_mut()
+            && let Ok(line) = serde_json::to_string(&entry)
+        {
+            use std::io::Write;
+            let _ = writeln!(file, "{line}");
+            let _ = file.flush();
+        }
+        self.log.push_back(entry);
+        while self.log.len() > LOG_LEN {
+            self.log.pop_front();
         }
     }
 
@@ -738,22 +873,25 @@ impl EditorRuntime {
     /// Run one training trial for every fly, on the act each fly is in.
     fn run_trials(&mut self) {
         for index in 0..self.agents.len() {
-            let act = &ACTS[self.acts[index].min(ACTS.len() - 1)];
-            let brain = &mut self.brains[index];
-            brain.fly.steps(6, FIXED_DT);
-            let result = brain.fly.train_trial(
-                &tfly::Lesson {
-                    id: act.id,
-                    name: act.name,
-                    objective: act.lesson,
-                    cue: act.cue,
-                    solution: act.solution,
-                    distractor: act.distractor,
-                },
-                self.epsilon,
-                &CANDIDATES,
-            );
-            brain.record(act, &result);
+            let act_index = self.acts[index].min(ACTS.len() - 1);
+            let act = &ACTS[act_index];
+            let lesson = tfly::Lesson {
+                id: act.id,
+                name: act.name,
+                objective: act.lesson,
+                cue: act.cue,
+                solution: act.solution,
+                distractor: act.distractor,
+            };
+            let result = {
+                let brain = &mut self.brains[index];
+                brain.fly.steps(6, FIXED_DT);
+                brain.fly.train_trial(&lesson, self.epsilon, &CANDIDATES)
+            };
+            let events = self.brains[index].record(act, act_index, &result, self.time);
+            for event in events {
+                self.log(event);
+            }
             self.total_trials = self.total_trials.saturating_add(1);
             if result.outcome == tfly::TrialOutcome::Correct {
                 self.total_correct = self.total_correct.saturating_add(1);
@@ -829,6 +967,7 @@ impl EditorRuntime {
             memory: brain.fly.memory_count(),
             last_lesson: brain.last_lesson.to_owned(),
             last_outcome: brain.last_outcome.to_owned(),
+            curve: brain.history.iter().cloned().collect(),
         })
     }
 
@@ -967,6 +1106,11 @@ impl EditorRuntime {
                 total_trials: self.total_trials,
                 total_correct: self.total_correct,
                 average_mastery: self.average_mastery(),
+                log: self.log.iter().cloned().collect(),
+                log_path: self
+                    .log_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
             },
             brain: self.brain_snapshot(),
             metrics: EditorMetrics {
@@ -1064,6 +1208,12 @@ impl EditorRuntime {
                         }
                     }
                 }
+                self.log(LogEntry {
+                    t: 0.0,
+                    fly: 0,
+                    kind: "act".to_owned(),
+                    text: format!("все на сцене: {}", act.name),
+                });
             }
             // Train the selected fly hard in its current act, for a burst of
             // trials without waiting for the timer.
@@ -1075,32 +1225,56 @@ impl EditorRuntime {
                     .or(Some(0));
                 if let Some(index) = index {
                     let act_index = self.acts[index];
+                    let act = &ACTS[act_index];
+                    let lesson = tfly::Lesson {
+                        id: act.id,
+                        name: act.name,
+                        objective: act.lesson,
+                        cue: act.cue,
+                        solution: act.solution,
+                        distractor: act.distractor,
+                    };
                     for _ in 0..burst {
-                        let act = &ACTS[act_index];
-                        let brain = &mut self.brains[index];
-                        let result = brain.fly.train_trial(
-                            &tfly::Lesson {
-                                id: act.id,
-                                name: act.name,
-                                objective: act.lesson,
-                                cue: act.cue,
-                                solution: act.solution,
-                                distractor: act.distractor,
-                            },
-                            self.epsilon,
-                            &CANDIDATES,
-                        );
-                        brain.record(act, &result);
+                        let result =
+                            self.brains[index]
+                                .fly
+                                .train_trial(&lesson, self.epsilon, &CANDIDATES);
+                        let events = self.brains[index].record(act, act_index, &result, self.time);
+                        for event in events {
+                            self.log(event);
+                        }
                         self.total_trials = self.total_trials.saturating_add(1);
                         if result.outcome == tfly::TrialOutcome::Correct {
                             self.total_correct = self.total_correct.saturating_add(1);
                             self.learning_updates = self.learning_updates.saturating_add(1);
                         }
                     }
+                    self.log(LogEntry {
+                        t: 0.0,
+                        fly: self.brains[index].id,
+                        kind: "train".to_owned(),
+                        // The level is stated here because the per-trial
+                        // level-up lines are rate limited and a burst may
+                        // cross many levels at once.
+                        text: format!(
+                            "тренировка ×{burst} в «{}» → уровень {}",
+                            act.name, self.brains[index].level
+                        ),
+                    });
                 }
             }
             "training" => {
                 self.training = command.enabled.unwrap_or(!self.training);
+                self.log(LogEntry {
+                    t: 0.0,
+                    fly: 0,
+                    kind: "training".to_owned(),
+                    text: if self.training {
+                        "автообучение включено".to_owned()
+                    } else {
+                        "автообучение выключено".to_owned()
+                    },
+                });
             }
             "epsilon" => {
                 self.epsilon = command.value.unwrap_or(self.epsilon).clamp(0.0, 1.0);
@@ -1114,6 +1288,12 @@ impl EditorRuntime {
                     self.brains[index].fly.steps(2, FIXED_DT);
                     self.brains[index].thought = self.brains[index]
                         .compose_thought(&ACTS[self.acts[index].min(ACTS.len() - 1)]);
+                    self.log(LogEntry {
+                        t: 0.0,
+                        fly: id,
+                        kind: "pain".to_owned(),
+                        text: format!("боль {:.0}% в левое крыло", intensity * 100.0),
+                    });
                 }
             }
             // Hormone administration. With `name` it injects into the C brain,
@@ -1125,6 +1305,12 @@ impl EditorRuntime {
                     let intensity = command.value.unwrap_or(0.5).clamp(0.0, 1.0);
                     if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
                         self.brains[index].fly.hormone_named(intensity, name, 5.0);
+                        self.log(LogEntry {
+                            t: 0.0,
+                            fly: id,
+                            kind: "hormone".to_owned(),
+                            text: format!("{name} {:.0}%", intensity * 100.0),
+                        });
                     }
                 } else if let Some(enabled) = command.enabled
                     && let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id)
@@ -1144,6 +1330,45 @@ impl EditorRuntime {
                     brain.level = 1;
                     brain.trials = 0;
                     brain.correct = 0;
+                    brain.history.clear();
+                    brain.mastered = [false; 5];
+                    self.log(LogEntry {
+                        t: 0.0,
+                        fly: id,
+                        kind: "unlearn".to_owned(),
+                        text: "ассоциации стёрты".to_owned(),
+                    });
+                }
+            }
+            // Start or stop mirroring events to a JSONL file.
+            "logfile" => {
+                let path = command.name.clone();
+                match path {
+                    Some(name) if !name.is_empty() && name != "off" => {
+                        let file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&name)
+                            .context("opening log file")?;
+                        self.log_path = Some(std::path::PathBuf::from(&name));
+                        self.log_file = Some(file);
+                        self.log(LogEntry {
+                            t: 0.0,
+                            fly: 0,
+                            kind: "logfile".to_owned(),
+                            text: format!("лог открыт: {name}"),
+                        });
+                    }
+                    _ => {
+                        self.log_file = None;
+                        self.log_path = None;
+                        self.log(LogEntry {
+                            t: 0.0,
+                            fly: 0,
+                            kind: "logfile".to_owned(),
+                            text: "лог закрыт".to_owned(),
+                        });
+                    }
                 }
             }
             "hormone_toggle" => {
@@ -1157,7 +1382,7 @@ impl EditorRuntime {
                 if self.agents.len() < MAX_FLIES {
                     let id = self.agents.iter().map(|agent| agent.id).max().unwrap_or(0) + 1;
                     self.agents.push(Agent::new(id, self.agents.len()));
-                    self.brains.push(Brain::new(0x5EED + id));
+                    self.brains.push(Brain::new(0x5EED + id, id));
                     self.acts.push(self.current_act);
                     self.selected = Some(id);
                 }
@@ -1624,6 +1849,119 @@ mod tests {
         assert!(
             separation > 0.3,
             "flies sharing a stage must not collapse onto one point, got {separation}"
+        );
+    }
+
+    #[test]
+    fn the_log_records_progress_and_bumps() {
+        let mut runtime = EditorRuntime::new(1);
+        // Start from a clean slate so the act command produces a line.
+        assert!(runtime.log.is_empty());
+        runtime
+            .apply_command(br#"{"action":"act","name":"garden"}"#)
+            .expect("act");
+        assert_eq!(runtime.log.len(), 1);
+        assert_eq!(runtime.log[0].kind, "act");
+
+        runtime
+            .apply_command(br#"{"action":"train","value":400}"#)
+            .expect("train");
+        let kinds: Vec<&str> = runtime.log.iter().map(|e| e.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"mastered"),
+            "mastering a lesson must be logged, got {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&"train"),
+            "the training burst must be logged"
+        );
+        assert!(
+            kinds.contains(&"level_up"),
+            "crossing a level must be logged"
+        );
+
+        // The curve must be populated for the sparkline.
+        let snapshot = runtime.snapshot(60.0);
+        let brain = snapshot.brain.expect("brain");
+        assert!(brain.curve.len() > 10, "curve should have samples");
+        assert!(brain.curve.iter().all(|p| (0.0..=1.0).contains(&p.mastery)));
+    }
+
+    #[test]
+    fn forgetting_is_logged_and_clears_the_curve() {
+        let mut runtime = EditorRuntime::new(1);
+        runtime
+            .apply_command(br#"{"action":"train","value":300}"#)
+            .expect("train");
+        assert!(!runtime.brains[0].history.is_empty());
+        runtime
+            .apply_command(br#"{"action":"unlearn","id":1}"#)
+            .expect("unlearn");
+        assert!(runtime.brains[0].history.is_empty());
+        assert!(
+            runtime.log.iter().any(|e| e.kind == "unlearn"),
+            "wiping the brain must be logged"
+        );
+    }
+
+    #[test]
+    fn log_can_be_mirrored_to_a_jsonl_file() {
+        let mut runtime = EditorRuntime::new(1);
+        let path = std::env::temp_dir().join("flytest-editor-log-test.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let name = path.display().to_string();
+        // Build the command as JSON rather than formatting it by hand, so a
+        // Windows path with backslashes cannot corrupt the payload.
+        let command = serde_json::json!({ "action": "logfile", "name": name });
+        runtime
+            .apply_command(command.to_string().as_bytes())
+            .expect("logfile on");
+        runtime
+            .apply_command(br#"{"action":"act","name":"void"}"#)
+            .expect("act");
+        assert!(path.exists(), "log file must be created");
+        let body = std::fs::read_to_string(&path).expect("read log");
+        let lines: Vec<&str> = body.lines().filter(|l| !l.is_empty()).collect();
+        assert!(lines.len() >= 2, "expected several JSONL lines");
+        for line in &lines {
+            let parsed: serde_json::Value =
+                serde_json::from_str(line).expect("every line must be valid JSON");
+            assert!(parsed.get("t").is_some());
+            assert!(parsed.get("kind").is_some());
+            assert!(parsed.get("text").is_some());
+        }
+        runtime
+            .apply_command(br#"{"action":"logfile","name":"off"}"#)
+            .expect("logfile off");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn level_up_lines_are_rate_limited() {
+        let mut runtime = EditorRuntime::new(1);
+        // A single burst crosses many levels within one frame. Every one of
+        // them being logged would bury the rest of the journal.
+        runtime
+            .apply_command(br#"{"action":"train","value":900}"#)
+            .expect("train");
+        let level_lines = runtime.log.iter().filter(|e| e.kind == "level_up").count();
+        assert!(
+            level_lines <= 2,
+            "a same-frame burst must not log every level, got {level_lines}"
+        );
+        // The burst itself reports the level actually reached, so rate
+        // limiting the per-trial lines does not lose that information.
+        let level = runtime.brains[0].level;
+        assert!(
+            level > 10,
+            "the burst should have levelled the fly up, got {level}"
+        );
+        assert!(
+            runtime
+                .log
+                .iter()
+                .any(|e| e.kind == "train" && e.text.contains(&format!("уровень {level}"))),
+            "the training line must state the level actually reached ({level})"
         );
     }
 

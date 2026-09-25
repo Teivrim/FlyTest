@@ -608,6 +608,71 @@ function renderBrain(data) {
   $('brain-mood').textContent = brain.mood;
   $('brain-drive').textContent = brain.drive;
   $('brain-outcome').textContent = brain.last_outcome;
+  drawCurve(brain.curve || []);
+  renderLog(data.training.log || [], data.training.log_path);
+}
+
+// ---- learning curve sparkline ----------------------------------------
+function drawCurve(points) {
+  const canvas = $('curve');
+  if (!canvas || !canvas.getContext) return;
+  const ctx = canvas.getContext('2d');
+  // Match the backing store to the CSS box so the line is not stretched.
+  const rect = canvas.getBoundingClientRect();
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = Math.max(1, Math.round((rect.width || 260) * dpr));
+  const h = Math.max(1, Math.round((rect.height || 46) * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  ctx.clearRect(0, 0, w, h);
+
+  $('curve-label').textContent = points.length ? `${points.length} проб` : 'нет данных';
+  if (points.length < 2) return;
+
+  const pad = 3 * dpr;
+  const innerW = w - pad * 2;
+  const innerH = h - pad * 2;
+  const series = [
+    { key: 'mastery', color: '#ff5c7a' },
+    { key: 'accuracy', color: '#6ee7a8' },
+    { key: 'gate', color: '#a98bff' },
+  ];
+  for (const s of series) {
+    ctx.beginPath();
+    for (let i = 0; i < points.length; i++) {
+      const x = pad + (i / (points.length - 1)) * innerW;
+      // Mastery is the only value that can go negative (a weight below zero),
+      // so it is drawn against a centred axis rather than a 0..1 floor.
+      const v = Math.max(-1, Math.min(1, points[i][s.key] ?? 0));
+      const y = v >= 0 ? pad + innerH * (1 - v) : pad + innerH;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = 1.4 * dpr;
+    ctx.globalAlpha = 0.9;
+    ctx.stroke();
+  }
+  // Zero line, so a negative weight is visibly below the axis.
+  ctx.globalAlpha = 0.25;
+  ctx.strokeStyle = '#8ea8ca';
+  ctx.lineWidth = 1 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(pad, pad + innerH);
+  ctx.lineTo(pad + innerW, pad + innerH);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+// ---- event log --------------------------------------------------------
+function renderLog(entries, path) {
+  $('log-path').textContent = path ? 'jsonl' : 'память';
+  const list = $('log-list');
+  const html = entries.slice().reverse().slice(0, 40).map((e) => {
+    const stamp = `${Math.floor(e.t / 60)}:${String(Math.floor(e.t % 60)).padStart(2, '0')}`;
+    const who = e.fly ? `#${e.fly} ` : '';
+    return `<li class="${escapeHtml(e.kind)}"><time>${stamp}</time><span>${who}${escapeHtml(e.text)}</span></li>`;
+  }).join('');
+  // Only rewrite when the content changed, so the list does not flicker.
+  if (list.dataset.sig !== html) { list.innerHTML = html; list.dataset.sig = html; }
 }
 function render3D() {
   if (!renderer) return;
@@ -637,6 +702,11 @@ $('epsilon').addEventListener('input', (event) => command('epsilon', { value: Nu
 $('brain-hurt').addEventListener('click', () => { if (state.selected != null) command('hurt', { id: state.selected, value: 0.8 }); });
 $('brain-dopamine').addEventListener('click', () => { if (state.selected != null) command('hormone', { id: state.selected, name: 'dopamine', value: 0.8 }); });
 $('brain-unlearn').addEventListener('click', () => { if (state.selected != null) command('unlearn', { id: state.selected }); });
+$('log-toggle').addEventListener('click', () => {
+  const on = state.data && state.data.training && state.data.training.log_path;
+  // The server appends, so re-clicking just reopens the same sink.
+  command('logfile', { name: on ? 'off' : 'runtime-output/training-log.jsonl' });
+});
 $('reward-button').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('reward', { id: agent.id }); });
 $('puff-button').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('puff', { id: agent.id }); });
 init3D(); refresh(); setInterval(refresh, 100); requestAnimationFrame(render3D); window.addEventListener('resize', resizeCanvas);
