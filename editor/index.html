@@ -52,6 +52,24 @@
           <button id="brain-unlearn" class="button">Забыть</button>
         </div>
         <label class="epsilon-row"><span>Любопытство (ε)</span><input id="epsilon" type="range" min="0" max="1" step="0.05" value="0.25"></label>
+        <div class="gait-block">
+          <div class="readout-head"><span>ПОХОДКА</span><span id="gait-balance">устойчивость 100%</span></div>
+          <div class="gait-name"><b id="gait-preset">ровный</b><span id="gait-steps">0 шагов</span></div>
+          <div class="gait-gauges">
+            <div><span>шаг</span><div class="meter"><i id="gait-stride"></i></div></div>
+            <div><span>темп</span><div class="meter"><i id="gait-cadence"></i></div></div>
+            <div><span>качание</span><div class="meter"><i id="gait-sway"></i></div></div>
+          </div>
+          <div class="gait-weights" id="gait-weights"></div>
+          <div class="train-actions">
+            <button id="walk-burst" class="button primary">Учить ходить ×200</button>
+            <button id="gait-cycle" class="button">Сменить походку</button>
+          </div>
+        </div>
+        <div class="affect-block">
+          <div class="readout-head"><span>ЭМОЦИИ</span><span id="affect-count">0</span></div>
+          <div id="affect-list" class="affect-list"></div>
+        </div>
         <div class="curve-block">
           <div class="readout-head"><span>КРИВАЯ ОБУЧЕНИЯ</span><span id="curve-label">нет данных</span></div>
           <canvas id="curve" class="curve" width="260" height="46"></canvas>

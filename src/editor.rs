@@ -30,6 +30,29 @@ pub struct EditorConfig {
     pub note: String,
 }
 
+/// The walk cycle of one character, for the renderer.
+#[derive(Debug, Clone, Serialize)]
+pub struct GaitSnapshot {
+    /// Which preset the character walks with.
+    pub preset: String,
+    /// Accumulated walk phase in radians.
+    pub phase: f32,
+    /// Step length, 0..1.
+    pub stride: f32,
+    /// Step rate, 0..1.
+    pub cadence: f32,
+    /// How much the character wavers, 0..1.
+    pub sway: f32,
+    /// Stability, 1 upright.
+    pub balance: f32,
+    /// Lifetime step count.
+    pub steps: u64,
+    /// How strongly each gait has been learned, by preset name.
+    pub weights: Vec<(String, f32)>,
+    /// How well the character has learned to walk, 0..1.
+    pub mastery: f32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentSnapshot {
     pub id: u32,
@@ -59,6 +82,11 @@ pub struct AgentSnapshot {
     pub hormone_enabled: bool,
     pub channel: String,
     pub selected: bool,
+    /// Body height above the floor, plus the walk cycle.
+    pub height: f32,
+    pub gait: GaitSnapshot,
+    /// Every emotion, not just the dominant one, for the affect display.
+    pub affect: Vec<(String, f32)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -220,8 +248,17 @@ struct Agent {
     hormone_level: f32,
     hormone_enabled: bool,
     channel: &'static str,
-    /// The stage this fly belongs to. Its policy flies it here.
+    /// The stage this fly belongs to. Its policy walks it here.
     anchor: [f32; 2],
+    /// Walk cycle state. These characters walk; they do not fly.
+    gait_phase: f32,
+    gait_stride: f32,
+    gait_cadence: f32,
+    gait_sway: f32,
+    steps: u64,
+    balance: f32,
+    /// Which of the four gaits the character currently walks with.
+    gait: usize,
 }
 
 impl Agent {
@@ -240,7 +277,9 @@ impl Agent {
         Self {
             id,
             name: names[index % names.len()].to_owned(),
-            position: [angle.cos() * 2.0, angle.sin() * 2.0, 1.0],
+            // These characters are on the ground, so the third component is
+            // always zero. It used to be altitude.
+            position: [angle.cos() * 2.0, angle.sin() * 2.0, 0.0],
             velocity: [0.0, 0.0, 0.0],
             energy: 1.0,
             stress: 0.0,
@@ -262,6 +301,13 @@ impl Agent {
             hormone_enabled: index.is_multiple_of(2),
             channel: if index == 0 { "input" } else { "internal" },
             anchor: [0.0, 0.0],
+            gait_phase: 0.0,
+            gait_stride: 0.45,
+            gait_cadence: 0.5,
+            gait_sway: 0.4,
+            steps: 0,
+            balance: 1.0,
+            gait: 1,
         }
     }
 
@@ -273,6 +319,26 @@ impl Agent {
     /// washed out within a few frames and the fly would never actually arrive.
     fn steer_towards(&mut self, target: [f32; 2], _gain: f32, _dt: f32) {
         self.anchor = target;
+    }
+
+    /// Advance the body forward along its current heading, for `n` steps.
+    ///
+    /// Used by gait trials, where the C brain decides the gait and moves but
+    /// the visible body has to follow, or the distance measured would be zero
+    /// while the character was plainly walking.
+    fn advance(&mut self, steps: u32, dt: f32) {
+        let speed = 0.6 + 0.5 * self.gait_cadence;
+        let distance = speed * dt * steps as f32;
+        let heading = if self.velocity[0].abs() + self.velocity[1].abs() > 1e-4 {
+            (self.velocity[0].powi(2) + self.velocity[1].powi(2)).sqrt()
+        } else {
+            1.0
+        };
+        self.position[0] += (self.velocity[0] / heading) * distance;
+        self.position[1] += (self.velocity[1] / heading) * distance;
+        for (axis, limit) in [(0, 9.2), (1, 9.2)] {
+            self.position[axis] = self.position[axis].clamp(-limit, limit);
+        }
     }
 
     fn step(&mut self, time: f32, dt: f32, speed: f32, decay: f32) {
@@ -294,27 +360,53 @@ impl Agent {
         let reaction = (turn * 0.5 + wave * 0.5).abs() * decay;
         self.reaction_level = reaction.clamp(0.0, 1.0);
 
-        // The fly flies to its act's stage. The attractor is the anchor plus a
-        // slow per-fly orbit, so a troupe arriving at one act spreads out into
-        // a loose formation instead of collapsing onto a single point.
+        // The character walks to its act's stage. The attractor is the anchor
+        // plus a slow per-character orbit, so a troupe arriving at one act
+        // spreads into a loose formation instead of stacking.
         let orbit_r = 0.55 + 0.18 * self.id as f32;
         let orbit_a = time * 0.5 + self.id as f32 * 2.1;
         let goal_x = self.anchor[0] + orbit_r * orbit_a.cos();
         let goal_y = self.anchor[1] + orbit_r * orbit_a.sin();
-        // Odour and light still bias the approach, so the flight is not a
-        // straight line, but the anchor dominates.
-        let desired_x = (goal_x - self.position[0]) * 0.55
-            + (self.odor - 0.5) * 0.9
-            + (time * 0.35 + self.id as f32).sin() * 0.25;
-        let desired_y = (goal_y - self.position[1]) * 0.55
-            + (self.light - 0.5) * 0.6
-            + (time * 0.27 + self.id as f32 * 1.7).cos() * 0.2;
-        let desired_z = 1.25 + (time * 0.8 + self.id as f32).sin() * 0.45;
-        let desired = [desired_x, desired_y, desired_z];
-        for (axis, target) in desired.iter().enumerate() {
-            self.velocity[axis] += (*target - self.velocity[axis]) * dt * 2.4 * speed;
+        let desired_x = (goal_x - self.position[0]) * 0.9
+            + (self.odor - 0.5) * 0.35
+            + (time * 0.35 + self.id as f32).sin() * 0.2;
+        let desired_y = (goal_y - self.position[1]) * 0.9
+            + (self.light - 0.5) * 0.25
+            + (time * 0.27 + self.id as f32 * 1.7).cos() * 0.15;
+        // Walking speed is capped far below the old flight speed, and is
+        // scaled by the learned stride rather than by raw thrust.
+        let pace = (0.35 + 0.55 * self.gait_cadence) * (0.4 + 0.6 * self.gait_stride);
+        let cap = pace * 1.6;
+        for (axis, target) in [desired_x, desired_y].into_iter().enumerate() {
+            self.velocity[axis] += (target - self.velocity[axis]) * dt * 2.6 * speed;
+            self.velocity[axis] = self.velocity[axis].clamp(-cap, cap);
             self.position[axis] += self.velocity[axis] * dt * speed;
         }
+        self.velocity[2] = 0.0;
+
+        // ---- the walk cycle ----
+        // Phase advances with distance covered, not with time, so a character
+        // standing still keeps its feet still instead of marching on the spot.
+        let moved = ((self.velocity[0] * dt).powi(2) + (self.velocity[1] * dt).powi(2)).sqrt();
+        let previous = self.gait_phase;
+        self.gait_phase =
+            (self.gait_phase + moved * 7.5 * self.gait_stride) % std::f32::consts::TAU;
+        if (previous as f64 / std::f64::consts::PI).floor()
+            != (self.gait_phase as f64 / std::f64::consts::PI).floor()
+        {
+            self.steps = self.steps.saturating_add(1);
+        }
+        // Sway at speed is what costs a character its footing.
+        let planar_speed = (self.velocity[0].powi(2) + self.velocity[1].powi(2)).sqrt();
+        let instability = self.gait_sway * planar_speed * 0.5;
+        self.balance = (self.balance - instability * dt).clamp(0.0, 1.0);
+        if self.balance < 0.25 {
+            self.velocity[0] *= 0.5;
+            self.velocity[1] *= 0.5;
+            self.balance = (self.balance + 0.25 * dt).clamp(0.0, 1.0);
+            self.stress = (self.stress + 0.1 * dt).clamp(0.0, 1.0);
+        }
+
         // Bound the arena generously, since the act stages sit at +-6.4.
         for (axis, limit) in [(0, 9.2), (1, 9.2)] {
             if self.position[axis].abs() > limit {
@@ -322,7 +414,6 @@ impl Agent {
                 self.velocity[axis] *= -0.45;
             }
         }
-        self.position[2] = self.position[2].clamp(0.6, 3.0);
         self.energy = (self.energy - dt * speed * (0.001 + throttle * 0.0015)).clamp(0.0, 1.0);
         self.stress = (self.stress * 0.985 + self.touch * dt * 0.015).clamp(0.0, 1.0);
         if self.hormone_enabled {
@@ -420,6 +511,39 @@ pub const CANDIDATES: [i32; 6] = [
     action::TURN_R,
     action::TURN_L,
     action::FORWARD,
+];
+
+/// The four gaits a character can learn to walk with, in C-core order.
+pub const GAIT_NAMES: [&str; 4] = ["торопливый", "ровный", "длинный", "петляющий"];
+
+/// Russian label for every emotion, matching `T_EMO_*` order.
+pub const EMOTION_NAMES: [&str; 26] = [
+    "боль",
+    "страх",
+    "радость",
+    "грусть",
+    "злость",
+    "отвращение",
+    "удивление",
+    "любопытство",
+    "влечение",
+    "жажда цели",
+    "довольство",
+    "тревога",
+    "растерянность",
+    "гордость",
+    "благодарность",
+    "облегчение",
+    "разочарование",
+    "надежда",
+    "ревность",
+    "застенчивость",
+    "привязанность",
+    "скука",
+    "восторг",
+    "сочувствие",
+    "доверие",
+    "тоска",
 ];
 
 pub const ACTS: [Act; 5] = [
@@ -900,12 +1024,100 @@ impl EditorRuntime {
         }
     }
 
+    /// One walking trial: try a gait, walk, and score how well it went.
+    ///
+    /// The score rewards ground actually covered, penalises the energy spent,
+    /// and penalises a stumble hardest, because a character that cannot stay
+    /// upright is not walking at all. The write-back uses the C core's
+    /// three-factor rule, so a character whose gate is shut learns nothing.
+    ///
+    /// Note what is being measured: distance walked, *not* progress toward the
+    /// act. The character already stands on its stage, so progress toward it
+    /// is always about zero and would carry no signal at all. Walking
+    /// competence and knowing where to go are separate lessons, and they are
+    /// trained separately.
+    fn run_gait_trial(&mut self, index: usize) -> f32 {
+        let start = self.agents[index].position;
+        let energy_before = self.brains[index].fly.energy();
+
+        // Pick a gait to try: mostly the learned favourite, sometimes a random
+        // one so the character keeps exploring.
+        let brain = &mut self.brains[index];
+        let chosen = if brain.fly.random() < self.epsilon {
+            brain.fly.random_index(GAIT_NAMES.len()) as i32
+        } else {
+            brain.fly.preferred_gait()
+        };
+        brain.fly.set_gait(chosen);
+
+        // Walk for a fixed window and see what happens. The visible body is
+        // advanced too, otherwise the distance measured would be zero while
+        // the character was plainly walking.
+        brain.fly.act(tfly::action::FORWARD, 1.0);
+        brain.fly.steps(40, FIXED_DT);
+        self.agents[index].advance(40, FIXED_DT);
+        let energy_used = (energy_before - brain.fly.energy()).max(0.0);
+        let fell = brain.fly.balance() < 0.3;
+
+        let end = self.agents[index].position;
+        let walked = ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt();
+        let score = tfly::gait_score(walked, energy_used, fell);
+        // A gait that neither helps nor hurts is not evidence either way, so
+        // only a real outcome is written down. Otherwise the character would
+        // learn "nothing works" from a handful of neutral steps.
+        if score.abs() > 0.02 {
+            brain.fly.train_gait(chosen, score);
+        }
+        // Adopting the learned gait is what makes the change visible in the
+        // rig on the next frame.
+        brain.fly.set_gait(brain.fly.preferred_gait());
+        score
+    }
+
     /// Mean mastery across every fly.
     fn average_mastery(&self) -> f32 {
         if self.brains.is_empty() {
             return 0.0;
         }
         self.brains.iter().map(|b| b.mastery).sum::<f32>() / self.brains.len() as f32
+    }
+
+    /// A fly's brain, looked up by agent id.
+    fn brain_of(&self, id: u32) -> Option<&Brain> {
+        self.agents
+            .iter()
+            .position(|agent| agent.id == id)
+            .and_then(|index| self.brains.get(index))
+    }
+
+    /// How strongly a fly has learned one gait, 0..1.
+    fn gait_weight_for(&self, id: u32, gait: usize) -> f32 {
+        self.brain_of(id)
+            .map_or(0.0, |brain| brain.fly.gait_weight(gait as i32))
+    }
+
+    /// Every emotion for a fly, as Russian-labelled pairs, strongest first.
+    fn affect_for(&self, id: u32) -> Vec<(String, f32)> {
+        let Some(brain) = self.brain_of(id) else {
+            return Vec::new();
+        };
+        let mut pairs: Vec<(String, f32)> = brain
+            .fly
+            .affect()
+            .into_iter()
+            .map(|(emotion_id, _, value)| {
+                (
+                    EMOTION_NAMES
+                        .get(emotion_id as usize)
+                        .copied()
+                        .unwrap_or("?")
+                        .to_owned(),
+                    value,
+                )
+            })
+            .collect();
+        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        pairs
     }
 
     /// The five acts, annotated with the selected fly's progress on each.
@@ -995,8 +1207,23 @@ impl EditorRuntime {
             let act = &ACTS[self.acts[index].min(ACTS.len() - 1)];
             let [ax, ay] = act.origin;
             self.agents[index].step(self.time, dt, self.speed, self.decay);
-            // A fly in an act hovers over that act's stage, so the scene reads
-            // as five groups of performers rather than one undifferentiated swarm.
+            // The visible body walks with whatever the brain has settled on.
+            // That is the point: the rig is not animated separately, it is a
+            // readout of the C core's gait state.
+            let brain = &mut self.brains[index];
+            brain.fly.steps(1, FIXED_DT);
+            let preferred = brain.fly.preferred_gait();
+            // An untrained fly keeps whatever it was already doing.
+            if brain.fly.gait_weight(preferred) > 0.01 {
+                brain.fly.set_gait(preferred);
+            }
+            self.agents[index].gait = preferred.max(0) as usize;
+            self.agents[index].gait_phase = brain.fly.gait_phase();
+            self.agents[index].gait_stride = brain.fly.gait_stride();
+            self.agents[index].gait_cadence = brain.fly.gait_cadence();
+            self.agents[index].gait_sway = brain.fly.gait_sway();
+            self.agents[index].balance = brain.fly.balance();
+            self.agents[index].steps = brain.fly.step_count() as u64;
             self.agents[index].steer_towards([ax, ay], 1.2, dt * self.speed);
             self.total_reactions += 1;
             if self.agents[index].hormone_level > 0.25 {
@@ -1029,6 +1256,11 @@ impl EditorRuntime {
             if self.trial_timer >= self.trial_interval {
                 self.trial_timer = 0.0;
                 self.run_trials();
+                // Every lesson trial is followed by a walking trial, so the
+                // two things the character is taught are trained together.
+                for index in 0..self.agents.len() {
+                    let _ = self.run_gait_trial(index);
+                }
             }
         }
     }
@@ -1039,6 +1271,13 @@ impl EditorRuntime {
             .iter()
             .map(|agent| {
                 let (drive, decision, confidence) = agent.intent();
+                let weights: Vec<(String, f32)> = GAIT_NAMES
+                    .iter()
+                    .enumerate()
+                    .map(|(index, name)| (name.to_string(), self.gait_weight_for(agent.id, index)))
+                    .collect();
+                let mastery = weights.iter().map(|(_, w)| *w).fold(0.0f32, f32::max);
+                let affect = self.affect_for(agent.id);
                 AgentSnapshot {
                     id: agent.id,
                     name: agent.name.clone(),
@@ -1072,6 +1311,19 @@ impl EditorRuntime {
                     hormone_enabled: agent.hormone_enabled,
                     channel: agent.channel.to_owned(),
                     selected: self.selected == Some(agent.id),
+                    height: 0.0,
+                    gait: GaitSnapshot {
+                        preset: GAIT_NAMES[agent.gait.min(GAIT_NAMES.len() - 1)].to_owned(),
+                        phase: agent.gait_phase,
+                        stride: agent.gait_stride,
+                        cadence: agent.gait_cadence,
+                        sway: agent.gait_sway,
+                        balance: agent.balance,
+                        steps: agent.steps,
+                        weights: weights.clone(),
+                        mastery,
+                    },
+                    affect,
                 }
             })
             .collect();
@@ -1338,6 +1590,47 @@ impl EditorRuntime {
                         kind: "unlearn".to_owned(),
                         text: "ассоциации стёрты".to_owned(),
                     });
+                }
+            }
+            // Train the character to walk. This is a different mechanism from
+            // the lesson trials: the fly tries a gait and is scored on how far
+            // it got, not on whether it picked the right action.
+            "walk" => {
+                let burst = (command.value.unwrap_or(30.0) as usize).clamp(1, 2000);
+                let index = self
+                    .selected
+                    .and_then(|id| self.agents.iter().position(|agent| agent.id == id))
+                    .or(Some(0));
+                if let Some(index) = index {
+                    for _ in 0..burst {
+                        let _ = self.run_gait_trial(index);
+                    }
+                    let brain = &self.brains[index];
+                    let best = brain.fly.preferred_gait();
+                    let mastery = brain.fly.gait_weight(best);
+                    self.log(LogEntry {
+                        t: 0.0,
+                        fly: brain.id,
+                        kind: "walk".to_owned(),
+                        text: format!(
+                            "ходьба ×{burst}, походка «{}» освоена на {:.0}%",
+                            GAIT_NAMES[best.max(0) as usize],
+                            mastery * 100.0
+                        ),
+                    });
+                }
+            }
+            // Force one specific gait, to compare them by hand.
+            "gait" => {
+                let id = command.id.context("gait requires id")?;
+                let which = command.value.unwrap_or(1.0).clamp(0.0, 3.0) as i32;
+                if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                    let brain = &mut self.brains[index];
+                    brain.fly.set_gait(which);
+                    self.agents[index].gait = which.max(0) as usize;
+                    self.agents[index].gait_stride = brain.fly.gait_stride();
+                    self.agents[index].gait_cadence = brain.fly.gait_cadence();
+                    self.agents[index].gait_sway = brain.fly.gait_sway();
                 }
             }
             // Start or stop mirroring events to a JSONL file.
@@ -1963,6 +2256,78 @@ mod tests {
                 .any(|e| e.kind == "train" && e.text.contains(&format!("уровень {level}"))),
             "the training line must state the level actually reached ({level})"
         );
+    }
+
+    #[test]
+    fn characters_walk_and_learn_a_gait() {
+        let mut runtime = EditorRuntime::new(1);
+        runtime
+            .apply_command(br#"{"action":"act","name":"garden"}"#)
+            .expect("act");
+        for _ in 0..600 {
+            runtime.step(FIXED_DT);
+        }
+        let agent = &runtime.agents[0];
+        assert!(agent.steps > 0, "a walking character must count steps");
+        assert!(
+            agent.gait_phase > 0.0,
+            "the walk cycle must advance, phase={}",
+            agent.gait_phase
+        );
+        // Training must shift the learned gait weights away from zero.
+        runtime
+            .apply_command(br#"{"action":"walk","value":300}"#)
+            .expect("walk");
+        let preferred = runtime.brains[0].fly.preferred_gait();
+        let best = runtime.brains[0].fly.gait_weight(preferred);
+        assert!(
+            best > 0.05,
+            "walking trials must teach a gait, best weight={best}"
+        );
+        assert!(
+            runtime.log.iter().any(|e| e.kind == "walk"),
+            "walk training must be logged"
+        );
+    }
+
+    #[test]
+    fn characters_stay_on_the_ground() {
+        let mut runtime = EditorRuntime::new(2);
+        for _ in 0..900 {
+            runtime.step(FIXED_DT);
+        }
+        for agent in &runtime.agents {
+            // Position index 2 used to be altitude when these things flew. It
+            // must now stay pinned to the floor.
+            assert_eq!(
+                agent.position[2], 0.0,
+                "characters must not leave the ground"
+            );
+            assert_eq!(agent.velocity[2], 0.0, "there must be no vertical velocity");
+        }
+    }
+
+    #[test]
+    fn the_snapshot_exposes_gait_and_the_full_affect_set() {
+        let mut runtime = EditorRuntime::new(1);
+        for _ in 0..120 {
+            runtime.step(FIXED_DT);
+        }
+        let snapshot = runtime.snapshot(60.0);
+        let agent = &snapshot.agents[0];
+        assert_eq!(agent.affect.len(), EMOTION_NAMES.len());
+        assert!(
+            agent
+                .affect
+                .iter()
+                .all(|(name, _)| EMOTION_NAMES.contains(&name.as_str())),
+            "every affect label must be a known emotion"
+        );
+        for pair in agent.affect.windows(2) {
+            assert!(pair[0].1 >= pair[1].1, "affect must be sorted descending");
+        }
+        assert_eq!(agent.gait.weights.len(), GAIT_NAMES.len());
+        assert!(agent.gait.steps > 0);
     }
 
     #[test]

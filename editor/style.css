@@ -112,6 +112,27 @@ h1 { font-size: 24px; } h2 { font-size: 17px; }
 .log-list li.pain span { color: #ff5c7a; }
 .log-list li.act span { color: #54d7e8; }
 .button.small { margin-top: 6px; padding: 5px 8px; font-size: 9px; }
+
+/* ---- gait + affect ---- */
+.gait-block { margin-top: 12px; padding: 10px; border: 1px solid rgba(110,231,168,.24); border-radius: 10px; background: linear-gradient(135deg, rgba(110,231,168,.07), rgba(84,215,232,.04)); }
+.gait-block .readout-head { color: #6ee7a8; }
+.gait-name { display: flex; align-items: baseline; justify-content: space-between; margin-top: 7px; }
+.gait-name b { color: #eaffef; font-size: 13px; }
+.gait-name span { color: var(--muted); font-size: 9px; }
+.gait-gauges { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.gait-gauges > div { display: grid; grid-template-columns: 52px 1fr; align-items: center; gap: 6px; }
+.gait-gauges span { color: var(--muted); font-size: 8px; }
+.gait-gauges .meter { height: 4px; }
+.gait-weights { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 8px; }
+.gait-weight { display: grid; grid-template-columns: 1fr 30px; align-items: center; gap: 5px; font-size: 8px; color: var(--muted); }
+.gait-weight i { display: block; height: 3px; border-radius: 2px; background: linear-gradient(90deg, #6ee7a8, #54d7e8); }
+.gait-weight.best { color: #eaffef; }
+.gait-weight.best i { background: #ffd76b; }
+.affect-block { margin-top: 12px; }
+.affect-list { display: grid; grid-template-columns: 1fr 1fr; gap: 3px 8px; margin-top: 6px; }
+.affect-row { display: grid; grid-template-columns: 1fr 28px; align-items: center; gap: 5px; font-size: 8px; color: var(--muted); }
+.affect-row i { display: block; height: 3px; border-radius: 2px; background: linear-gradient(90deg, #ff5c7a, #ffd76b); }
+.affect-row b { color: #dcecff; font-weight: 600; text-align: right; }
 .train-actions .button.primary { background: linear-gradient(135deg, #ff5c7a, #ff8f5c); border-color: transparent; color: #14060f; font-weight: 600; }
 
 /* ---- act list ---- */

@@ -58,13 +58,15 @@ extern "C" {
 
 #define TFLY_N_SENSORY 12
 #define TFLY_N_REGION 10
-#define TFLY_N_EMOTION 14
+#define TFLY_N_EMOTION 26
 #define TFLY_N_DRIVE 8
 #define TFLY_N_HORMONE 26
 #define TFLY_N_ACTION 10
 #define TFLY_N_CUE 12
 #define TFLY_N_MEMORY 24
 #define TFLY_N_PULSE 8
+/* Gait presets a fly can learn to walk with. */
+#define TFLY_N_GAIT 4
 
 /* ------------------------------------------------------------------ *
  * Sensory channels
@@ -124,6 +126,21 @@ enum {
     T_EMO_DREAD,
     T_EMO_CONFUSION,
     T_EMO_PRIDE,
+    /* The richer half. These are what make a character read as a person
+     * rather than as a state vector: they are social, anticipatory, and they
+     * decay at very different rates from the reflexes above. */
+    T_EMO_GRATITUDE,
+    T_EMO_RELIEF,
+    T_EMO_DISAPPOINTMENT,
+    T_EMO_HOPE,
+    T_EMO_JEALOUSY,
+    T_EMO_SHYNESS,
+    T_EMO_AFFECTION,
+    T_EMO_BOREDOM,
+    T_EMO_EXCITEMENT,
+    T_EMO_COMPASSION,
+    T_EMO_TRUST,
+    T_EMO_LONGING,
     T_EMOTION_END
 };
 
@@ -263,6 +280,19 @@ typedef struct {
     float action[TFLY_N_ACTION];
     float out_thrust, out_turn, out_vertical, out_wingbeat;
 
+    /* Gait. These are what the fly learns: stride, cadence, sway, and how hard
+     * it pulls toward a companion while walking. They approach the targets
+     * computed in TPolicy, but the fly can override them by learning weights
+     * through TAssociate. */
+    float gait_stride;   /* step length, 0..1 */
+    float gait_cadence;  /* steps per second, 0..1 */
+    float gait_sway;     /* how much it wavers, 0..1 */
+    float gait_approach; /* pull toward a mate, 0..1 */
+    float gait_phase;   /* accumulated walk cycle, radians */
+    float steps;         /* lifetime step count */
+    float balance;       /* 1 stable, 0 falling over */
+    unsigned gait_weight[TFLY_N_GAIT];
+
     /* physiology */
     float energy;     /* 0..1 */
     float stress;     /* 0..1 */
@@ -372,6 +402,12 @@ static inline void TNew(TFLY *fly) {
     fly->plasticity = 1.0f;
     fly->emotion[T_EMO_CONTENTMENT] = 0.2f;
     fly->out_wingbeat = 0.0f;
+    /* A newborn fly has a usable but untrained gait. */
+    fly->gait_stride = 0.45f;
+    fly->gait_cadence = 0.5f;
+    fly->gait_sway = 0.4f;
+    fly->gait_approach = 0.0f;
+    fly->balance = 1.0f;
     TResetLearning(fly);
 }
 
@@ -381,6 +417,7 @@ static inline void TResetLearning(TFLY *fly) {
         for (int a = 0; a < TFLY_N_ACTION; a++) fly->assoc[c][a] = 0.0f;
     for (int a = 0; a < TFLY_N_ACTION; a++) fly->elig[a] = 0.0f;
     for (int c = 0; c < TFLY_N_CUE; c++) fly->cue_value[c] = 0.0f;
+    for (int g = 0; g < TFLY_N_GAIT; g++) fly->gait_weight[g] = 0u;
 }
 
 /* Seed the stimulus RNG so a run can be replayed exactly. */
@@ -661,6 +698,78 @@ static inline void TClearHormones(TFLY *fly) {
         fly->hormone_set[i] = 0.0f;
         fly->pulse[i] = 0.0f;
     }
+}
+
+/* ------------------------------------------------------------------ *
+ * Gait
+ *
+ * A fly does not pick "walk fast" out of the air; it tries one of a small set
+ * of gait presets, and the three-factor rule decides which of them it keeps.
+ * That is the honest way to model learning to walk: the fly cannot invent a
+ * new stride, it can only get better at the ones it has tried.
+ * ------------------------------------------------------------------ */
+
+/* The four gaits a fly can learn. Each is a stride/cadence/sway triple. */
+static inline void TFlyGaitPreset(int g, float *stride, float *cadence, float *sway) {
+    switch (TClampIdx(g, TFLY_N_GAIT)) {
+        case 0: *stride = 0.22f; *cadence = 0.85f; *sway = 0.15f; return; /* hurried */
+        case 1: *stride = 0.55f; *cadence = 0.50f; *sway = 0.25f; return; /* steady */
+        case 2: *stride = 0.80f; *cadence = 0.35f; *sway = 0.45f; return; /* long stride */
+        default: *stride = 0.40f; *cadence = 0.60f; *sway = 0.60f; return; /* weaving */
+    }
+}
+
+static inline const char *TFlyGaitName(int g) {
+    switch (TClampIdx(g, TFLY_N_GAIT)) {
+        case 0: return "торопливый";
+        case 1: return "ровный";
+        case 2: return "длинный";
+        default: return "петляющий";
+    }
+}
+
+/* Apply a preset to the fly's body. This is what the animation reads. */
+static inline void TSetGait(TFLY *fly, int g) {
+    if (fly == NULL) return;
+    float s, c, w;
+    TFlyGaitPreset(g, &s, &c, &w);
+    fly->gait_stride = s;
+    fly->gait_cadence = c;
+    fly->gait_sway = w;
+}
+
+/* How strongly the fly has learned to prefer a gait, 0..1. */
+static inline float TGaitWeight(TFLY *fly, int g) {
+    if (fly == NULL) return 0.0f;
+    return (float)fly->gait_weight[TClampIdx(g, TFLY_N_GAIT)] / 1000.0f;
+}
+
+/*
+ * The outcome of a walking trial. Distance is progress in the right
+ * direction, cost is energy burned, and a stumble is penalised hardest
+ * because a fly that cannot stay upright is not really walking.
+ */
+static inline float TGaitScore(TFLY *fly, float distance, float energy_used, int fell) {
+    if (fly == NULL) return 0.0f;
+    float score = distance * 2.0f - energy_used * 1.5f;
+    if (fell) score -= 0.6f;
+    return TClamp(score, -1.0f, 1.0f);
+}
+
+/*
+ * One gait trial. The fly adopts a preset, walks for `window` seconds, and
+ * the caller scores how far it got. The update is the same three-factor rule
+ * used everywhere else: the gait was actually performed, an outcome arrived,
+ * and the modulator decided whether it could be written down at all.
+ */
+static inline void TTrainGait(TFLY *fly, int g, float score) {
+    if (fly == NULL) return;
+    int gi = TClampIdx(g, TFLY_N_GAIT);
+    float gate = TLearningGate(fly);
+    if (gate <= 0.0f) return;
+    float delta = 0.02f * fly->plasticity * gate * TClamp(score, -1.0f, 1.0f);
+    int w = (int)fly->gait_weight[gi] + (int)(delta * 1000.0f);
+    fly->gait_weight[gi] = (unsigned)TClamp((float)w, 0.0f, 1000.0f);
 }
 
 /* ------------------------------------------------------------------ *
@@ -948,6 +1057,12 @@ static inline void TPolicy(TFLY *fly, float dt) {
     float curiosity = fly->emotion[T_EMO_CURIOSITY];
     float anger = fly->emotion[T_EMO_ANGER];
     float sadness = fly->emotion[T_EMO_SADNESS];
+    /* A hopeful fly walks faster and straighter; a bored one dawdles. These
+     * feed the gait, which is the part the fly is actually learning. */
+    float hope = fly->emotion[T_EMO_HOPE];
+    float boredom = fly->emotion[T_EMO_BOREDOM];
+    float excitement = fly->emotion[T_EMO_EXCITEMENT] + fly->emotion[T_EMO_JOY];
+    float affection = fly->emotion[T_EMO_AFFECTION];
 
     /* exploration scales with curiosity, and is suppressed by fear */
     float explore = 0.05f + 0.35f * curiosity * (1.0f - 0.7f * fear);
@@ -1003,6 +1118,21 @@ static inline void TPolicy(TFLY *fly, float dt) {
         fly->elig[a] *= decay;
         fly->elig[a] += fly->action[a] * dt;
     }
+
+    /* ---- gait targets ----
+     * The fly does not choose a gait here; it chooses a *desire* for one, and
+     * the walk itself is learned separately. Pain and fear clamp the stride
+     * down, hope and excitement raise the cadence, boredom slows everything,
+     * and affection toward a nearby mate keeps the fly near her. */
+    float stride_want = 0.55f + 0.25f * hope + 0.20f * excitement - 0.45f * pain - 0.25f * fear;
+    float cadence_want = 0.55f + 0.20f * excitement + 0.15f * curiosity - 0.30f * boredom +
+                         0.20f * anger;
+    float approach = 0.25f * fly->mate_quality * affection;
+
+    fly->gait_stride = TExp(fly->gait_stride, TClamp(stride_want, 0.05f, 1.0f), 1.5f, dt);
+    fly->gait_cadence = TExp(fly->gait_cadence, TClamp(cadence_want, 0.05f, 1.0f), 1.5f, dt);
+    fly->gait_sway = TExp(fly->gait_sway, TClamp(0.3f + 0.4f * boredom - 0.2f * pain, 0.0f, 1.0f), 2.0f, dt);
+    fly->gait_approach = TExp(fly->gait_approach, TClamp(approach, 0.0f, 1.0f), 3.0f, dt);
     (void)pain;
 }
 
@@ -1077,6 +1207,63 @@ static inline void TUpdate(TFLY *fly, float dt) {
     fly->emotion[T_EMO_LUST] = TClamp(fly->emotion[T_EMO_LUST] + fly->hormone[T_H_JUVENILE_HORMONE] * 0.01f * dt, 0.0f, 1.0f);
     fly->emotion[T_EMO_ANGER] = TClamp(fly->emotion[T_EMO_ANGER] + fly->hormone[T_H_ECDYSONE] * 0.005f * dt, 0.0f, 1.0f);
 
+    /* ---- the richer affect layer ----
+     * These are derived, not stored ad hoc: relief falls as pain clears,
+     * boredom grows when nothing new happens, excitement spikes on a reward
+     * surge, and the social states decay very slowly because a companion is
+     * remembered long after the moment has passed. */
+    {
+        float pain_now = 0.0f;
+        for (int r = 0; r < TFLY_N_REGION; r++) pain_now += fly->pain[r];
+        pain_now = TClamp(pain_now, 0.0f, 1.0f);
+
+        /* Relief: the falling edge of pain, not the absence of it. */
+        float relief = TClamp((fly->pain_memory - pain_now) * 0.5f, 0.0f, 1.0f);
+        fly->emotion[T_EMO_RELIEF] =
+            TExp(fly->emotion[T_EMO_RELIEF], relief, 2.0f, dt);
+
+        /* Boredom: no novelty, no demand, nothing happening. */
+        float novelty_now = 0.0f;
+        for (int i = 0; i < TFLY_N_SENSORY; i++) novelty_now += fly->novel[i];
+        float busy = TClamp(0.25f * pain_now + 0.2f * (1.0f - fly->energy) +
+                                 0.3f * TClamp(novelty_now, 0.0f, 1.0f) +
+                                 0.3f * fly->drive[T_DRIVE_SEX],
+                             0.0f, 1.0f);
+        fly->emotion[T_EMO_BOREDOM] = TExp(fly->emotion[T_EMO_BOREDOM], 1.0f - busy, 6.0f, dt);
+
+        /* Excitement and hope ride the reward channel; disappointment is what
+         * is left when a demand goes unmet while the fly is trying to meet it. */
+        fly->emotion[T_EMO_EXCITEMENT] = TExp(fly->emotion[T_EMO_EXCITEMENT],
+                                              TClamp(dop + npf * 0.5f, 0.0f, 1.0f), 2.0f, dt);
+        float unmet = TClamp(fly->drive[T_DRIVE_HUNGER] - (1.0f - fly->energy), 0.0f, 1.0f);
+        fly->emotion[T_EMO_HOPE] = TExp(fly->emotion[T_EMO_HOPE],
+                                        TClamp(0.5f + 0.5f * fly->energy - unmet, 0.0f, 1.0f),
+                                        8.0f, dt);
+        fly->emotion[T_EMO_DISAPPOINTMENT] =
+            TExp(fly->emotion[T_EMO_DISAPPOINTMENT], TClamp(unmet - 0.2f, 0.0f, 1.0f), 5.0f, dt);
+
+        /* Social states are slow. They are driven by whether anyone is around
+         * at all, which here means a mate or a rival signal being present. */
+        float company = TClamp(fly->mate_quality, 0.0f, 1.0f);
+        float threat = TClamp(fly->rival_pressure + fly->predator_risk, 0.0f, 1.0f);
+        fly->emotion[T_EMO_AFFECTION] = TExp(fly->emotion[T_EMO_AFFECTION], company, 12.0f, dt);
+        fly->emotion[T_EMO_TRUST] = TExp(fly->emotion[T_EMO_TRUST], company * (1.0f - threat), 20.0f, dt);
+        fly->emotion[T_EMO_LONGING] = TExp(fly->emotion[T_EMO_LONGING],
+                                           TClamp(fly->drive[T_DRIVE_SEX] * (1.0f - company), 0.0f, 1.0f),
+                                           15.0f, dt);
+        fly->emotion[T_EMO_JEALOUSY] = TExp(fly->emotion[T_EMO_JEALOUSY],
+                                            TClamp(company * threat, 0.0f, 1.0f), 12.0f, dt);
+        fly->emotion[T_EMO_SHYNESS] = TExp(fly->emotion[T_EMO_SHYNESS],
+                                           TClamp(company * (1.0f - fly->energy) * 0.8f, 0.0f, 1.0f),
+                                           8.0f, dt);
+        fly->emotion[T_EMO_COMPASSION] = TExp(fly->emotion[T_EMO_COMPASSION],
+                                              TClamp(fly->emotion[T_EMO_SADNESS] * 0.5f, 0.0f, 1.0f),
+                                              10.0f, dt);
+        fly->emotion[T_EMO_GRATITUDE] = TExp(fly->emotion[T_EMO_GRATITUDE],
+                                             TClamp(company * 0.3f + (1.0f - pain_now) * 0.2f, 0.0f, 1.0f),
+                                             9.0f, dt);
+    }
+
     /* excitation and inhibition shift sensory gain and the stress ceiling */
     for (int i = 0; i < TFLY_N_SENSORY; i++) {
         fly->gain[i] = TClamp(fly->gain[i] + (glu - gaba) * 0.01f * dt, 0.0f, 2.0f);
@@ -1123,22 +1310,60 @@ static inline void TUpdate(TFLY *fly, float dt) {
         fly->out_turn = 0.0f;
         fly->out_vertical = 0.0f;
         fly->out_wingbeat = 0.0f;
+        fly->balance = TExp(fly->balance, 1.0f, 2.0f, dt);
     } else {
         TPolicy(fly, dt);
     }
 
+    /* ---- walking ----
+     * These flies do not fly. The gait is integrated on the ground plane, and
+     * the "wingbeat" output now drives the walk cycle, which is why it is
+     * called that: it is the limb oscillator, not a wing. Sway and a mismatch
+     * between the learned stride and the desired one cost balance, and a fly
+     * that loses its balance is punished for it, which is what gives the
+     * learning something to converge on. */
+    {
+        float pace = TClamp(fly->out_thrust, 0.0f, 1.0f);
+        float hz = 0.6f + 3.4f * fly->gait_cadence;     /* steps per second */
+        float step_len = 0.10f + 0.22f * fly->gait_stride;
+        float prev_phase = fly->gait_phase;
+        fly->gait_phase += hz * dt * 6.2831853f;
+        /* Count whole steps, not phase revolutions. */
+        float before = (float)(long)(prev_phase / 3.14159265f);
+        float after = (float)(long)(fly->gait_phase / 3.14159265f);
+        if (after > before) {
+            int steps = (int)(after - before);
+            fly->steps += (float)steps;
+            /* Landing a step costs energy in proportion to how long it was. */
+            fly->energy = TClamp(fly->energy - 0.0009f * step_len * (float)steps, 0.0f, 1.0f);
+        }
+        /* A large sway while moving fast is a fall waiting to happen. */
+        float instability = fly->gait_sway * pace * (0.4f + 0.6f * fly->gait_stride);
+        fly->balance = TClamp(fly->balance - 0.25f * instability * dt, 0.0f, 1.0f);
+        if (fly->balance < 0.25f) {
+            /* Stumble: slow down and bleed balance back. */
+            fly->out_thrust *= 0.4f;
+            fly->balance = TClamp(fly->balance + 0.25f * dt, 0.0f, 1.0f);
+        }
+        fly->stress = TClamp(fly->stress + 0.02f * (1.0f - fly->balance) * dt, 0.0f, 1.0f);
+        /* Walking burns energy through the legs, not through flight. */
+        fly->energy = TClamp(fly->energy - 0.0022f * pace * dt *
+                                             (1.0f - 0.3f * fly->hormone[T_H_INSULIN]),
+                             0.0f, 1.0f);
+    }
+
     /* ---- physiology ----
-     * Resting must actually pay off. A fly that stops beating its wings both
+     * Resting must actually pay off. A fly that stops stepping both
      * burns far less and recovers, so the rest term is gated on the action
      * vector rather than on a fixed bonus. */
     float resting = fly->asleep ? 1.0f : TClamp(fly->action[T_ACT_REST], 0.0f, 1.0f);
-    float burn = 0.0008f + 0.0035f * fly->out_wingbeat / 200.0f + 0.002f * fly->action[T_ACT_DANCE];
+    float burn = 0.0004f + 0.0016f * fly->out_thrust + 0.0010f * fly->action[T_ACT_DANCE];
     burn *= (1.0f - 0.9f * resting);
     fly->energy = TClamp(fly->energy - burn * dt * (1.0f - 0.3f * fly->hormone[T_H_INSULIN]), 0.0f, 1.0f);
     if (fly->action[T_ACT_EAT] > 0.3f) fly->energy = TClamp(fly->energy + 0.01f * dt, 0.0f, 1.0f);
     fly->energy = TClamp(fly->energy + 0.006f * resting * dt, 0.0f, 1.0f);
     fly->stress = TClamp(fly->stress - 0.01f * dt + fly->emotion[T_EMO_DREAD] * 0.01f * dt, 0.0f, 1.0f);
-    fly->temp_body = TExp(fly->temp_body, 0.5f + 0.3f * fly->out_wingbeat / 200.0f, 10.0f, dt);
+    fly->temp_body = TExp(fly->temp_body, 0.5f + 0.2f * fly->out_thrust, 10.0f, dt);
     fly->lifespan = TClamp(1.0f - fly->age / 86400.0f, 0.0f, 1.0f);
 
     /* ---- sleep gating ----
@@ -1220,17 +1445,29 @@ static inline float TFlyEmotionHalfLife(int e) {
     switch (TClampIdx(e, TFLY_N_EMOTION)) {
         case T_EMO_PAIN: return 2.0f;
         case T_EMO_SURPRISE: return 1.5f;
+        case T_EMO_CONFUSION: return 2.0f;
         case T_EMO_ANGER: return 3.0f;
         case T_EMO_DISGUST: return 4.0f;
         case T_EMO_CURIOSITY: return 3.0f;
         case T_EMO_CRAVING: return 3.0f;
+        case T_EMO_EXCITEMENT: return 3.0f;
         case T_EMO_FEAR: return 5.0f;
         case T_EMO_JOY: return 6.0f;
         case T_EMO_LUST: return 5.0f;
         case T_EMO_PRIDE: return 6.0f;
         case T_EMO_SADNESS: return 8.0f;
+        case T_EMO_DISAPPOINTMENT: return 8.0f;
+        case T_EMO_GRATITUDE: return 9.0f;
+        case T_EMO_RELIEF: return 6.0f;
+        case T_EMO_HOPE: return 12.0f;
         case T_EMO_DREAD: return 10.0f;
-        case T_EMO_CONFUSION: return 2.0f;
+        case T_EMO_AFFECTION: return 20.0f;
+        case T_EMO_TRUST: return 30.0f;
+        case T_EMO_LONGING: return 25.0f;
+        case T_EMO_COMPASSION: return 15.0f;
+        case T_EMO_JEALOUSY: return 18.0f;
+        case T_EMO_SHYNESS: return 12.0f;
+        case T_EMO_BOREDOM: return 14.0f;
         default: return 10.0f; /* contentment */
     }
 }
@@ -1282,7 +1519,19 @@ static inline const char *TFlyEmotionName(int e) {
         case T_EMO_CONTENTMENT: return "contentment";
         case T_EMO_DREAD: return "dread";
         case T_EMO_CONFUSION: return "confusion";
-        default: return "pride";
+        case T_EMO_PRIDE: return "pride";
+        case T_EMO_GRATITUDE: return "gratitude";
+        case T_EMO_RELIEF: return "relief";
+        case T_EMO_DISAPPOINTMENT: return "disappointment";
+        case T_EMO_HOPE: return "hope";
+        case T_EMO_JEALOUSY: return "jealousy";
+        case T_EMO_SHYNESS: return "shyness";
+        case T_EMO_AFFECTION: return "affection";
+        case T_EMO_BOREDOM: return "boredom";
+        case T_EMO_EXCITEMENT: return "excitement";
+        case T_EMO_COMPASSION: return "compassion";
+        case T_EMO_TRUST: return "trust";
+        default: return "longing";
     }
 }
 

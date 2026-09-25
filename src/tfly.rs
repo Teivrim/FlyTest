@@ -155,6 +155,15 @@ unsafe extern "C" {
     fn tfly_random(handle: *mut TFlyHandle) -> c_float;
     fn tfly_act(handle: *mut TFlyHandle, action: c_int, amount: c_float);
     fn tfly_clear_actions(handle: *mut TFlyHandle);
+    fn tfly_set_gait(handle: *mut TFlyHandle, g: c_int);
+    fn tfly_gait_weight(handle: *mut TFlyHandle, g: c_int) -> c_float;
+    fn tfly_train_gait(handle: *mut TFlyHandle, g: c_int, score: c_float);
+    fn tfly_gait_stride(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_gait_cadence(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_gait_sway(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_gait_phase(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_step_count(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_balance(handle: *mut TFlyHandle) -> c_float;
 
     fn tfly_to_json(handle: *mut TFlyHandle, buf: *mut c_char, cap: c_int) -> c_int;
     fn tfly_hormone_name(id: c_int) -> *const c_char;
@@ -250,6 +259,59 @@ pub mod emotion {
     pub const DREAD: i32 = 11;
     pub const CONFUSION: i32 = 12;
     pub const PRIDE: i32 = 13;
+    pub const GRATITUDE: i32 = 14;
+    pub const RELIEF: i32 = 15;
+    pub const DISAPPOINTMENT: i32 = 16;
+    pub const HOPE: i32 = 17;
+    pub const JEALOUSY: i32 = 18;
+    pub const SHYNESS: i32 = 19;
+    pub const AFFECTION: i32 = 20;
+    pub const BOREDOM: i32 = 21;
+    pub const EXCITEMENT: i32 = 22;
+    pub const COMPASSION: i32 = 23;
+    pub const TRUST: i32 = 24;
+    pub const LONGING: i32 = 25;
+
+    /// Every emotion, in declaration order, for enumeration in the UI.
+    pub const ALL: [(&str, i32); 26] = [
+        ("pain", PAIN),
+        ("fear", FEAR),
+        ("joy", JOY),
+        ("sadness", SADNESS),
+        ("anger", ANGER),
+        ("disgust", DISGUST),
+        ("surprise", SURPRISE),
+        ("curiosity", CURIOSITY),
+        ("lust", LUST),
+        ("craving", CRAVING),
+        ("contentment", CONTENTMENT),
+        ("dread", DREAD),
+        ("confusion", CONFUSION),
+        ("pride", PRIDE),
+        ("gratitude", GRATITUDE),
+        ("relief", RELIEF),
+        ("disappointment", DISAPPOINTMENT),
+        ("hope", HOPE),
+        ("jealousy", JEALOUSY),
+        ("shyness", SHYNESS),
+        ("affection", AFFECTION),
+        ("boredom", BOREDOM),
+        ("excitement", EXCITEMENT),
+        ("compassion", COMPASSION),
+        ("trust", TRUST),
+        ("longing", LONGING),
+    ];
+}
+
+/// Gait presets the fly can learn to walk with.
+pub mod gait {
+    pub const HURRIED: i32 = 0;
+    pub const STEADY: i32 = 1;
+    pub const LONG_STRIDE: i32 = 2;
+    pub const WEAVING: i32 = 3;
+    pub const COUNT: i32 = 4;
+
+    pub const NAMES: [&str; 4] = ["торопливый", "ровный", "длинный", "петляющий"];
 }
 
 /// Drives, matching `T_DRIVE_*`.
@@ -708,6 +770,21 @@ impl Fly {
 // ===========================================================================
 
 /// The outcome of a single training trial.
+/// Score a walking trial, matching `TGaitScore` in the C core.
+///
+/// `progress` is ground covered toward the goal, `energy_used` is what the walk
+/// cost, and `fell` records that the character lost its footing. A stumble is
+/// the heaviest penalty, because a character that cannot stay upright is not
+/// walking at all.
+#[must_use]
+pub fn gait_score(progress: f32, energy_used: f32, fell: bool) -> f32 {
+    let mut score = progress * 2.0 - energy_used * 1.5;
+    if fell {
+        score -= 0.6;
+    }
+    score.clamp(-1.0, 1.0)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrialOutcome {
     /// The fly picked the right action.
@@ -964,6 +1041,245 @@ impl Fly {
     #[must_use]
     pub fn cue_key(&self, cue: i32) -> f32 {
         cue as f32 + 0.5
+    }
+
+    // ---- gait ---------------------------------------------------------
+
+    /// Adopt one of the gait presets and return its index.
+    pub fn set_gait(&mut self, gait: i32) {
+        unsafe { tfly_set_gait(self.ptr(), gait) }
+    }
+
+    /// How strongly the fly has learned to prefer a gait, 0..1.
+    #[must_use]
+    pub fn gait_weight(&self, gait: i32) -> f32 {
+        unsafe { tfly_gait_weight(self.ptr(), gait) }
+    }
+
+    /// Write down the outcome of a walking trial, gated by the learning gate.
+    pub fn train_gait(&mut self, gait: i32, score: f32) {
+        unsafe { tfly_train_gait(self.ptr(), gait, score) }
+    }
+
+    /// Current stride length, 0..1. The renderer reads this for leg extension.
+    #[must_use]
+    pub fn gait_stride(&self) -> f32 {
+        unsafe { tfly_gait_stride(self.ptr()) }
+    }
+
+    /// Current step rate, 0..1.
+    #[must_use]
+    pub fn gait_cadence(&self) -> f32 {
+        unsafe { tfly_gait_cadence(self.ptr()) }
+    }
+
+    /// How much the fly wavers, 0..1. High sway costs balance.
+    #[must_use]
+    pub fn gait_sway(&self) -> f32 {
+        unsafe { tfly_gait_sway(self.ptr()) }
+    }
+
+    /// Accumulated walk cycle in radians, for the leg animation.
+    #[must_use]
+    pub fn gait_phase(&self) -> f32 {
+        unsafe { tfly_gait_phase(self.ptr()) }
+    }
+
+    /// Lifetime step count.
+    #[must_use]
+    pub fn step_count(&self) -> f32 {
+        unsafe { tfly_step_count(self.ptr()) }
+    }
+
+    /// Stability, 1 upright and 0 about to fall over.
+    #[must_use]
+    pub fn balance(&self) -> f32 {
+        unsafe { tfly_balance(self.ptr()) }
+    }
+
+    /// The gait the fly currently prefers, breaking ties with its own RNG.
+    #[must_use]
+    pub fn preferred_gait(&self) -> i32 {
+        let mut best = 0;
+        let mut best_w = self.gait_weight(0);
+        for g in 1..gait::COUNT {
+            let w = self.gait_weight(g);
+            if w > best_w {
+                best = g;
+                best_w = w;
+            }
+        }
+        best
+    }
+
+    /// Every emotion as `(id, name, value)`, sorted strongest first.
+    ///
+    /// The UI needs all of them at once to draw the affect cloud.
+    #[must_use]
+    pub fn affect(&self) -> Vec<(i32, &'static str, f32)> {
+        let mut out: Vec<(i32, &'static str, f32)> = emotion::ALL
+            .iter()
+            .map(|&(name, id)| (id, name, self.emotion_level(id)))
+            .collect();
+        out.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        out
+    }
+}
+
+#[cfg(test)]
+mod gait_tests {
+    use super::*;
+    use crate::tfly::{action, gait, odor};
+
+    /// A fly that is rewarded for a gait must end up preferring it.
+    #[test]
+    fn learning_shifts_preference_toward_the_rewarded_gait() {
+        let mut fly = Fly::new();
+        fly.seed(31337);
+        // Reward the "steady" gait and punish the others, as a fly being
+        // corrected for a bad walk would experience.
+        for _ in 0..400 {
+            fly.train_gait(gait::STEADY, 1.0);
+            fly.train_gait(gait::HURRIED, -1.0);
+            fly.train_gait(gait::LONG_STRIDE, -1.0);
+            fly.train_gait(gait::WEAVING, -1.0);
+        }
+        assert_eq!(fly.preferred_gait(), gait::STEADY);
+        assert!(fly.gait_weight(gait::STEADY) > 0.5);
+    }
+
+    /// A closed gate must prevent gait learning, exactly as it does for
+    /// associations. If it did not, a fly could learn to walk while unable to
+    /// learn anything else, which would be incoherent.
+    #[test]
+    fn gait_learning_respects_the_gate() {
+        let mut open = Fly::new();
+        let mut shut = Fly::new();
+        open.seed(5);
+        shut.seed(5);
+        shut.hormone(2.0, hormone::SEROTONIN, 0.0);
+        for _ in 0..200 {
+            open.train_gait(gait::STEADY, 1.0);
+            shut.train_gait(gait::STEADY, 1.0);
+        }
+        assert!(
+            shut.gait_weight(gait::STEADY) < open.gait_weight(gait::STEADY),
+            "a suppressed gate must slow gait learning: shut={} open={}",
+            shut.gait_weight(gait::STEADY),
+            open.gait_weight(gait::STEADY)
+        );
+    }
+
+    /// The walk cycle must actually advance steps, and walking must cost more
+    /// than standing still.
+    ///
+    /// The claim is walker versus rest, not walker versus its starting value:
+    /// a fly that has just eaten legitimately regains energy faster than it
+    /// spends, so only the comparison isolates the cost of walking.
+    #[test]
+    fn walking_advances_steps_and_costs_energy() {
+        let mut walker = Fly::new();
+        walker.seed(9);
+        walker.set_gait(gait::STEADY);
+        let before_steps = walker.step_count();
+        for _ in 0..600 {
+            walker.act(action::FORWARD, 1.0);
+            walker.steps(1, 1.0 / 60.0);
+        }
+
+        let mut rested = Fly::new();
+        rested.seed(9);
+        rested.set_gait(gait::STEADY);
+        for _ in 0..600 {
+            rested.act(action::REST, 1.0);
+            rested.steps(1, 1.0 / 60.0);
+        }
+
+        assert!(
+            walker.step_count() > before_steps,
+            "a moving fly must take steps: {} -> {}",
+            before_steps,
+            walker.step_count()
+        );
+        assert!(
+            walker.energy() < rested.energy(),
+            "walking must cost more than resting: walker={} rested={}",
+            walker.energy(),
+            rested.energy()
+        );
+    }
+
+    /// A fly with a bad, swaying gait must lose balance; a steady one must not.
+    #[test]
+    fn sway_costs_balance() {
+        let mut weaver = Fly::new();
+        weaver.seed(4);
+        weaver.set_gait(gait::WEAVING);
+        for _ in 0..900 {
+            weaver.act(action::FORWARD, 1.0);
+            weaver.steps(1, 1.0 / 60.0);
+        }
+        let mut steady = Fly::new();
+        steady.seed(4);
+        steady.set_gait(gait::STEADY);
+        for _ in 0..900 {
+            steady.act(action::FORWARD, 1.0);
+            steady.steps(1, 1.0 / 60.0);
+        }
+        assert!(
+            weaver.balance() < steady.balance(),
+            "a weaving gait must be less stable: weaver={} steady={}",
+            weaver.balance(),
+            steady.balance()
+        );
+    }
+
+    /// The new affect states must be derived, not dead storage: pain clearing
+    /// has to produce relief, and a fresh idle fly has to feel something.
+    #[test]
+    fn new_emotions_are_driven_by_state() {
+        let mut fly = Fly::new();
+        fly.seed(11);
+        fly.heart(1.0, body::WING_L);
+        fly.steps(20, 1.0 / 60.0);
+        assert!(fly.emotion_level(emotion::RELIEF) >= 0.0);
+        // Pain has to start falling for relief to have anything to track.
+        fly.heal_all();
+        fly.steps(30, 1.0 / 60.0);
+        assert!(
+            fly.emotion_level(emotion::RELIEF) > 0.0,
+            "clearing pain must produce relief"
+        );
+
+        // A social signal must produce affection and a little hope.
+        let mut social = Fly::new();
+        social.seed(3);
+        social.mate_signal(1.0);
+        social.steps(120, 1.0 / 60.0);
+        assert!(social.emotion_level(emotion::AFFECTION) > 0.1);
+        assert!(social.emotion_level(emotion::TRUST) > 0.0);
+        assert!(social.emotion_level(emotion::LONGING) >= 0.0);
+    }
+
+    /// The full affect list must be readable and correctly sized.
+    #[test]
+    fn affect_lists_every_emotion() {
+        let fly = Fly::new();
+        let affect = fly.affect();
+        assert_eq!(affect.len(), emotion::ALL.len());
+        // Sorted strongest first.
+        for pair in affect.windows(2) {
+            assert!(pair[0].2 >= pair[1].2, "affect must be sorted descending");
+        }
+    }
+
+    #[test]
+    fn touch_and_odor_still_drive_the_policy() {
+        let mut fly = Fly::new();
+        fly.seed(2);
+        fly.odor(0.7, odor::FRUIT);
+        fly.steps(30, 1.0 / 60.0);
+        assert!(fly.sensory_level(crate::tfly::sense::ODOR) > 0.0);
     }
 }
 

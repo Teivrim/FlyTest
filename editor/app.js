@@ -484,22 +484,176 @@ function labelSprite(text, color) {
   sprite.scale.set(2.2, 0.55, 1); return sprite;
 }
 
+// =========================================================================
+// The character
+//
+// These are not flies any more. They walk, they cannot fly, and they are
+// built as stylised anime figures: chibi proportions, large eyes, a dress,
+// and a pair of translucent vestigial wings as the only reminder of what
+// they used to be. The rig is deliberately simple and driven entirely by the
+// gait numbers coming from the C core, so what the fly learned is visible in
+// how it walks.
+// =========================================================================
+
+const HAIR_COLORS = ['#ff6fa5', '#8ce0ff', '#c9a6ff', '#ffd76b', '#7dffc4', '#ff9f7a'];
+const SKIN = '#ffe0cf';
+const OUTFITS = ['#ff5c7a', '#54d7e8', '#a98bff', '#8ce06a', '#ffb86b'];
+
 function createFlyVisual(agent) {
   const group = new THREE.Group();
-  const color = agent.channel === 'input' ? '#6ee7a8' : (agent.id % 2 ? '#a98bff' : '#54d7e8');
-  const body = new THREE.Mesh(new THREE.SphereGeometry(0.22, 20, 12), material(color, color, 0.28)); body.scale.set(0.8, 0.65, 1.25); body.castShadow = true; group.add(body);
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.14, 16, 10), material('#dcecff', '#54d7e8', 0.18)); head.position.set(0, 0.02, -0.24); group.add(head);
-  const wingMaterial = new THREE.MeshStandardMaterial({ color: '#bdeaff', transparent: true, opacity: 0.55, side: THREE.DoubleSide, roughness: 0.2 });
-  const leftWing = new THREE.Mesh(new THREE.PlaneGeometry(0.48, 0.22), wingMaterial); leftWing.position.set(-0.28, 0.08, 0); leftWing.rotation.x = Math.PI / 2; leftWing.rotation.z = -0.28; group.add(leftWing);
-  const rightWing = leftWing.clone(); rightWing.position.x = 0.28; rightWing.rotation.z = 0.28; group.add(rightWing);
-  const eyeMaterial = new THREE.MeshBasicMaterial({ color: '#ff5478' });
-  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.045, 10, 8), eyeMaterial); eyeL.position.set(-0.11, 0.06, -0.33); group.add(eyeL);
-  const eyeR = eyeL.clone(); eyeR.position.x = 0.11; group.add(eyeR);
-  const selection = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.018, 8, 32), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.8 })); selection.rotation.x = Math.PI / 2; selection.position.y = -0.12; group.add(selection);
-  const label = labelSprite(agent.name, color); label.position.set(0, 0.6, 0); group.add(label);
-  const puffGroup = new THREE.Group(); puffGroup.position.set(0, 0.12, 0.42); puffGroup.visible = false; for (let i = 0; i < 3; i++) { const puffMaterial = new THREE.MeshBasicMaterial({ color: '#b6f36b', transparent: true, opacity: 0.0, depthWrite: false }); const puff = new THREE.Mesh(new THREE.SphereGeometry(0.10 + i * 0.025, 10, 8), puffMaterial); puff.position.set(i * 0.08, i * 0.04, i * 0.06); puffGroup.add(puff); } group.add(puffGroup);
-  group.userData = { agentId: agent.id, body, leftWing, rightWing, selection, label, puffGroup, color };
-  scene.add(group); return group;
+  const index = agent.id - 1;
+  const hair = HAIR_COLORS[index % HAIR_COLORS.length];
+  const outfit = OUTFITS[index % OUTFITS.length];
+
+  // Rig root sits at the hips so the legs can swing from one pivot.
+  const rig = new THREE.Group();
+  group.add(rig);
+
+  // ---- torso: a tapered dress, wider at the hem ----
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.10, 0.19, 0.34, 16),
+    material(outfit, outfit, 0.16)
+  );
+  body.position.y = 0.17;
+  body.castShadow = true;
+  rig.add(body);
+
+  const collar = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.02, 6, 14), material('#fff4f8'));
+  collar.rotation.x = Math.PI / 2;
+  collar.position.y = 0.35;
+  rig.add(collar);
+
+  // ---- head ----
+  const head = new THREE.Group();
+  head.position.y = 0.40;
+  rig.add(head);
+  const face = new THREE.Mesh(new THREE.SphereGeometry(0.115, 20, 16), material(SKIN, '#ffd7c2', 0.05));
+  face.scale.set(1.0, 0.95, 0.92);
+  face.castShadow = true;
+  head.add(face);
+
+  // Anime eyes: a large dark iris under a highlight, set wide on the face.
+  const eyeWhite = new THREE.Mesh(new THREE.SphereGeometry(0.034, 12, 10), new THREE.MeshBasicMaterial({ color: '#ffffff' }));
+  eyeWhite.scale.set(1.15, 0.9, 0.5);
+  const eyeL = eyeWhite.clone(); eyeL.position.set(-0.048, 0.012, 0.100); head.add(eyeL);
+  const eyeR = eyeWhite.clone(); eyeR.position.set(0.048, 0.012, 0.100); head.add(eyeR);
+  const irisMaterial = new THREE.MeshBasicMaterial({ color: '#2b1a3d' });
+  const irisL = new THREE.Mesh(new THREE.SphereGeometry(0.021, 12, 10), irisMaterial);
+  irisL.scale.set(1, 1, 0.5); irisL.position.set(-0.048, 0.010, 0.118); head.add(irisL);
+  const irisR = irisL.clone(); irisR.position.x = 0.048; head.add(irisR);
+  const shineMaterial = new THREE.MeshBasicMaterial({ color: '#ffffff' });
+  const shineL = new THREE.Mesh(new THREE.SphereGeometry(0.008, 8, 6), shineMaterial);
+  shineL.position.set(-0.056, 0.028, 0.132); head.add(shineL);
+  const shineR = shineL.clone(); shineR.position.x = 0.040; head.add(shineR);
+  // Blush, the cheapest way to make a face read as friendly.
+  const blushMaterial = new THREE.MeshBasicMaterial({ color: '#ff9ab5', transparent: true, opacity: 0.5 });
+  const blushL = new THREE.Mesh(new THREE.CircleGeometry(0.022, 10), blushMaterial);
+  blushL.position.set(-0.072, -0.026, 0.100); head.add(blushL);
+  const blushR = blushL.clone(); blushR.position.x = 0.072; head.add(blushR);
+
+  // ---- hair: cap, fringe, side locks, twin tails ----
+  const hairMaterial = material(hair, hair, 0.12);
+  const cap = new THREE.Mesh(
+    new THREE.SphereGeometry(0.122, 18, 14, 0, Math.PI * 2, 0, Math.PI * 0.58),
+    hairMaterial
+  );
+  cap.position.y = 0.012;
+  head.add(cap);
+  const fringe = new THREE.Mesh(new THREE.BoxGeometry(0.19, 0.055, 0.03), hairMaterial);
+  fringe.position.set(0, 0.062, 0.098);
+  fringe.rotation.x = 0.18;
+  head.add(fringe);
+  const lockGeometry = new THREE.CapsuleGeometry(0.028, 0.14, 4, 8);
+  const lockL = new THREE.Mesh(lockGeometry, hairMaterial);
+  lockL.position.set(-0.105, -0.035, 0.02); lockL.rotation.z = 0.2; head.add(lockL);
+  const lockR = new THREE.Mesh(lockGeometry, hairMaterial);
+  lockR.position.set(0.105, -0.035, 0.02); lockR.rotation.z = -0.2; head.add(lockR);
+  // Twin tails are the strongest silhouette cue at this scale.
+  const tail = new THREE.Mesh(new THREE.CapsuleGeometry(0.032, 0.17, 4, 8), hairMaterial);
+  tail.position.set(-0.125, 0.045, -0.06); tail.rotation.set(0.5, 0, 0.55); head.add(tail);
+  const tailR = tail.clone(); tailR.position.x = 0.125; tailR.rotation.z = -0.55; head.add(tailR);
+
+  // ---- antennae, the fly inheritance ----
+  const antennaMaterial = new THREE.MeshBasicMaterial({ color: '#3a2b46' });
+  const stalkGeometry = new THREE.CylinderGeometry(0.004, 0.004, 0.09, 5);
+  const stalkL = new THREE.Mesh(stalkGeometry, antennaMaterial);
+  stalkL.position.set(-0.05, 0.10, -0.01); stalkL.rotation.set(0.3, 0, 0.5); head.add(stalkL);
+  const stalkR = new THREE.Mesh(stalkGeometry, antennaMaterial);
+  stalkR.position.set(0.05, 0.10, -0.01); stalkR.rotation.set(0.3, 0, -0.5); head.add(stalkR);
+  const beadMaterial = new THREE.MeshBasicMaterial({ color: hair });
+  const beadL = new THREE.Mesh(new THREE.SphereGeometry(0.014, 8, 6), beadMaterial);
+  beadL.position.set(-0.09, 0.145, -0.01); head.add(beadL);
+  const beadR = beadL.clone(); beadR.position.x = 0.09; head.add(beadR);
+
+  // ---- vestigial wings: folded, because these flies cannot fly ----
+  const wingMaterial = new THREE.MeshStandardMaterial({
+    color: '#dff4ff', transparent: true, opacity: 0.38, side: THREE.DoubleSide,
+    roughness: 0.15, depthWrite: false
+  });
+  const leftWing = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.13), wingMaterial);
+  leftWing.position.set(-0.12, 0.27, -0.10);
+  leftWing.rotation.set(0.2, 0.5, 1.15);
+  rig.add(leftWing);
+  const rightWing = leftWing.clone();
+  rightWing.position.x = 0.12;
+  rightWing.rotation.set(0.2, -0.5, -1.15);
+  rig.add(rightWing);
+
+  // ---- arms ----
+  const armGeometry = new THREE.CapsuleGeometry(0.022, 0.11, 4, 8);
+  const armL = new THREE.Mesh(armGeometry, material(SKIN));
+  armL.position.set(-0.105, 0.20, 0.01); armL.rotation.z = 0.22; rig.add(armL);
+  const armR = new THREE.Mesh(armGeometry, material(SKIN));
+  armR.position.set(0.105, 0.20, 0.01); armR.rotation.z = -0.22; rig.add(armR);
+
+  // ---- legs: the part being learned ----
+  const legGeometry = new THREE.CapsuleGeometry(0.028, 0.13, 4, 8);
+  const shoeMaterial = material(outfit, outfit, 0.2);
+  function makeLeg() {
+    const pivot = new THREE.Group();
+    const upper = new THREE.Mesh(legGeometry, material(SKIN));
+    upper.position.y = -0.09;
+    pivot.add(upper);
+    const shoe = new THREE.Mesh(new THREE.SphereGeometry(0.034, 10, 8), shoeMaterial);
+    shoe.scale.set(0.85, 0.6, 1.25);
+    shoe.position.set(0, -0.175, 0.018);
+    pivot.add(shoe);
+    return pivot;
+  }
+  const legL = makeLeg(); legL.position.set(-0.055, 0.035, 0); rig.add(legL);
+  const legR = makeLeg(); legR.position.set(0.055, 0.035, 0); rig.add(legR);
+
+  const selection = new THREE.Mesh(
+    new THREE.TorusGeometry(0.26, 0.014, 8, 36),
+    new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.85 })
+  );
+  selection.rotation.x = Math.PI / 2;
+  selection.position.y = 0.015;
+  group.add(selection);
+
+  const label = labelSprite(agent.name, hair);
+  label.position.set(0, 0.78, 0);
+  label.scale.set(1.7, 0.42, 1);
+  group.add(label);
+
+  const puffGroup = new THREE.Group();
+  puffGroup.position.set(0, 0.18, 0.14);
+  puffGroup.visible = false;
+  for (let i = 0; i < 3; i++) {
+    const puffMaterial = new THREE.MeshBasicMaterial({ color: '#b6f36b', transparent: true, opacity: 0, depthWrite: false });
+    const puff = new THREE.Mesh(new THREE.SphereGeometry(0.06 + i * 0.018, 10, 8), puffMaterial);
+    puff.position.set(i * 0.05, i * 0.03, i * 0.04);
+    puffGroup.add(puff);
+  }
+  group.add(puffGroup);
+
+  group.userData = {
+    agentId: agent.id, body, head, face, hair, outfit, rig,
+    leftWing, rightWing, armL, armR, legL, legR,
+    selection, label, puffGroup,
+  };
+  scene.add(group);
+  return group;
 }
 
 function removeFlyVisual(id) {
@@ -514,12 +668,60 @@ function syncScene() {
   for (const id of trailLines.keys()) if (!ids.has(id)) removeFlyVisual(id);
   state.data.agents.forEach((agent, index) => {
     let visual = flyVisuals.get(agent.id); if (!visual) { visual = createFlyVisual(agent); flyVisuals.set(agent.id, visual); }
-    visual.position.set(agent.position[0], agent.position[2], agent.position[1]);
-    const velocity = agent.velocity; visual.rotation.y = Math.atan2(velocity[0], velocity[2]);
-    const flap = Math.sin(performance.now() * 0.018 + index) * 0.45; visual.userData.leftWing.rotation.x = Math.PI / 2 + flap; visual.userData.rightWing.rotation.x = Math.PI / 2 - flap;
-    visual.userData.selection.visible = agent.selected;
-    visual.userData.body.material.emissiveIntensity = 0.2 + agent.hormone_level * 1.5;
-    visual.userData.body.scale.setScalar(0.9 + agent.energy * 0.12);
+    const ud = visual.userData;
+    // These characters are on the ground. `height` is the body height above
+    // the floor, and the walk cycle adds its bob on top.
+    const gait = agent.gait || {};
+    const phase = gait.phase || 0;
+    const speed = Math.hypot(agent.velocity[0], agent.velocity[1]);
+    const walking = speed > 0.05;
+    const stride = Math.max(0, Math.min(1, gait.stride ?? 0.5));
+    const sway = Math.max(0, Math.min(1, gait.sway ?? 0.3));
+    const balance = Math.max(0, Math.min(1, gait.balance ?? 1));
+
+    visual.position.set(agent.position[0], 0, agent.position[1]);
+    const heading = Math.atan2(agent.velocity[0], agent.velocity[1]);
+    // Ease the turn so the figure does not snap between facings.
+    visual.rotation.y += (heading - visual.rotation.y) * 0.25;
+
+    // Vertical bob at twice the step rate, which is what a walk actually is.
+    const bob = walking ? Math.abs(Math.sin(phase)) * 0.035 * stride : 0;
+    const crouch = (1 - balance) * 0.06;
+    ud.rig.position.y = (agent.height || 0) + bob - crouch;
+    // A little torso roll, growing with sway: an unstable walk looks unstable.
+    ud.rig.rotation.z = Math.sin(phase) * 0.05 * sway;
+
+    // Legs swing in opposition, amplitude set by the learned stride.
+    const swing = walking ? Math.sin(phase) * 0.55 * stride : 0;
+    ud.legL.rotation.x = swing;
+    ud.legR.rotation.x = -swing;
+    ud.legL.rotation.z = Math.max(0, swing) * 0.25;
+    ud.legR.rotation.z = Math.max(0, -swing) * 0.25;
+
+    // Arms counter-swing, damped when the character is worn out.
+    const armSwing = walking ? Math.sin(phase) * 0.35 * stride * (0.5 + 0.5 * agent.energy) : 0.05;
+    ud.armL.rotation.x = -armSwing;
+    ud.armR.rotation.x = armSwing;
+
+    // The wings stay folded. They are vestigial: these flies cannot fly, and
+    // all they get is a small idle flutter.
+    const flutter = Math.sin(performance.now() * 0.003 + index) * 0.05;
+    ud.leftWing.rotation.x = 0.2 + flutter;
+    ud.rightWing.rotation.x = 0.2 - flutter;
+
+    ud.head.rotation.y = Math.sin(performance.now() * 0.0009 + index) * 0.18;
+
+    ud.selection.visible = agent.selected;
+    ud.body.material.emissiveIntensity = 0.16 + agent.hormone_level * 1.2;
+    // Affect tints the outfit: joy warms it, fear cools it.
+    const mood = (agent.affect && agent.affect.joy) || 0;
+    const dread = (agent.affect && agent.affect.fear) || 0;
+    ud.body.material.emissive.setRGB(
+      0.35 + mood * 0.4,
+      0.20 + mood * 0.2 - dread * 0.1,
+      0.30 - dread * 0.15 + mood * 0.1
+    );
+    ud.body.scale.setScalar(0.94 + agent.energy * 0.08);
     let history = state.histories.get(agent.id); if (!history) { history = []; state.histories.set(agent.id, history); } history.push(agent.position); if (history.length > 36) history.shift();
     let trail = trailLines.get(agent.id);
     if (!trail) { const geometry = new THREE.BufferGeometry(); geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(36 * 3), 3)); const material = new THREE.LineBasicMaterial({ color: agent.selected ? '#ffffff' : visual.userData.color, transparent: true, opacity: agent.selected ? 0.65 : 0.25 }); trail = new THREE.Line(geometry, material); trail.frustumCulled = false; scene.add(trail); trailLines.set(agent.id, trail); }
@@ -610,6 +812,33 @@ function renderBrain(data) {
   $('brain-outcome').textContent = brain.last_outcome;
   drawCurve(brain.curve || []);
   renderLog(data.training.log || [], data.training.log_path);
+  renderGaitAndAffect(agent);
+}
+
+// ---- gait and affect -------------------------------------------------
+function renderGaitAndAffect(agent) {
+  const gait = agent.gait || {};
+  const pct = (v) => `${Math.round(Math.max(0, Math.min(1, v || 0)) * 100)}%`;
+  $('gait-preset').textContent = gait.preset || '—';
+  $('gait-steps').textContent = `${gait.steps || 0} шагов`;
+  $('gait-balance').textContent = `устойчивость ${pct(gait.balance)}`;
+  $('gait-stride').style.width = pct(gait.stride);
+  $('gait-cadence').style.width = pct(gait.cadence);
+  $('gait-sway').style.width = pct(gait.sway);
+
+  const weights = gait.weights || [];
+  const best = weights.reduce((acc, w) => Math.max(acc, w[1]), 0);
+  $('gait-weights').innerHTML = weights.map(([name, value]) => {
+    const cls = value >= best - 1e-6 && value > 0.01 ? 'best' : '';
+    return `<span class="gait-weight ${cls}">${escapeHtml(name)}<b></b><i style="width:${pct(value)}"></i></span>`;
+  }).join('');
+
+  // Every emotion, not just the strongest, so a character reads as a mix.
+  const affect = agent.affect || [];
+  $('affect-count').textContent = `${affect.filter(([, v]) => v > 0.01).length} активных`;
+  $('affect-list').innerHTML = affect.map(([name, value]) =>
+    `<span class="affect-row">${escapeHtml(name)}<i style="width:${pct(value)}"></i><b>${Math.round(value * 100)}</b></span>`
+  ).join('');
 }
 
 // ---- learning curve sparkline ----------------------------------------
@@ -702,6 +931,15 @@ $('epsilon').addEventListener('input', (event) => command('epsilon', { value: Nu
 $('brain-hurt').addEventListener('click', () => { if (state.selected != null) command('hurt', { id: state.selected, value: 0.8 }); });
 $('brain-dopamine').addEventListener('click', () => { if (state.selected != null) command('hormone', { id: state.selected, name: 'dopamine', value: 0.8 }); });
 $('brain-unlearn').addEventListener('click', () => { if (state.selected != null) command('unlearn', { id: state.selected }); });
+$('walk-burst').addEventListener('click', () => command('walk', { value: 200 }));
+$('gait-cycle').addEventListener('click', () => {
+  if (state.selected == null) return;
+  const agent = state.data && state.data.agents.find((item) => item.id === state.selected);
+  const current = agent && agent.gait ? (agent.gait.weights || []).indexOf(
+    (agent.gait.weights || []).find((w) => w[0] === agent.gait.preset)
+  ) : 0;
+  command('gait', { id: state.selected, value: ((current < 0 ? 0 : current) + 1) % 4 });
+});
 $('log-toggle').addEventListener('click', () => {
   const on = state.data && state.data.training && state.data.training.log_path;
   // The server appends, so re-clicking just reopens the same sink.

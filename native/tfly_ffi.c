@@ -150,6 +150,17 @@ void tfly_clear_actions(TFlyHandle *h) {
     for (int i = 0; i < TFLY_N_ACTION; i++) h->action[i] = 0.0f;
 }
 
+/* ---- gait ---- */
+void tfly_set_gait(TFlyHandle *h, int g) { TSetGait(h, g); }
+float tfly_gait_weight(TFlyHandle *h, int g) { return TGaitWeight(h, g); }
+void tfly_train_gait(TFlyHandle *h, int g, float score) { TTrainGait(h, g, score); }
+float tfly_gait_stride(TFlyHandle *h) { return h->gait_stride; }
+float tfly_gait_cadence(TFlyHandle *h) { return h->gait_cadence; }
+float tfly_gait_sway(TFlyHandle *h) { return h->gait_sway; }
+float tfly_gait_phase(TFlyHandle *h) { return h->gait_phase; }
+float tfly_step_count(TFlyHandle *h) { return h->steps; }
+float tfly_balance(TFlyHandle *h) { return h->balance; }
+
 int tfly_to_json(TFlyHandle *h, char *buf, int cap) { return TToJson(h, buf, cap); }
 
 const char *tfly_hormone_name(int id) { return TFlyHormoneName(id); }
