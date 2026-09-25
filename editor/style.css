@@ -83,6 +83,15 @@ h1 { font-size: 24px; } h2 { font-size: 17px; }
 .readout strong { display: block; margin-top: 9px; color: #e9f7ff; font-size: 14px; }
 .readout p { margin: 4px 0 0; color: var(--violet); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; }
 .readout small { display: block; margin-top: 7px; color: var(--muted); font-size: 9px; }
+.adventure { margin-top: 15px; padding: 11px; border: 1px solid rgba(255,184,107,.28); border-radius: 10px; background: linear-gradient(135deg, rgba(255,184,107,.08), rgba(169,139,255,.05)); }
+.adventure strong { display: block; margin-top: 8px; color: #ffe4bd; font-size: 13px; }
+.adventure p { margin: 4px 0 9px; color: #c6ae8d; font-size: 10px; }
+.adventure progress { width: 100%; height: 5px; accent-color: var(--orange); }
+.adventure select { width: 100%; margin-top: 10px; padding: 7px 8px; border: 1px solid var(--line); border-radius: 7px; color: var(--text); background: var(--panel-2); font-size: 10px; }
+.adventure-actions { display: flex; gap: 7px; margin-top: 9px; }
+.adventure-actions .button { flex: 1; padding: 7px 8px; font-size: 10px; }
+.learning-strip { display: flex; justify-content: space-between; gap: 5px; margin-top: 10px; color: var(--muted); font-size: 9px; }
+.learning-strip b { color: var(--cyan); font-weight: 600; }
 .control-block { margin-top: 19px; }
 .control-block label { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
 output { color: var(--text); }

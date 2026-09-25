@@ -8,6 +8,7 @@ let arenaGroup;
 let sensorGroup;
 let flyVisuals = new Map();
 let trailLines = new Map();
+let goalMarker;
 let cameraAzimuth = 0.72;
 let cameraElevation = 0.48;
 let cameraDistance = 12.5;
@@ -66,6 +67,8 @@ function buildArena() {
   sensorGroup = new THREE.Group(); arenaGroup.add(sensorGroup);
   const sensorMaterial = new THREE.MeshBasicMaterial({ color: '#ffb86b' });
   [[-4.5, 0.12, -2.4], [4.2, 0.12, 2.1], [0, 0.12, -4.6]].forEach(([x, y, z]) => { const sensor = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 8), sensorMaterial); sensor.position.set(x, y, z); sensorGroup.add(sensor); });
+  goalMarker = new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 10), new THREE.MeshBasicMaterial({ color: '#ffb86b' })); goalMarker.position.set(0, 0.3, 0); arenaGroup.add(goalMarker);
+  const goalRing = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.025, 8, 32), new THREE.MeshBasicMaterial({ color: '#ffb86b', transparent: true, opacity: 0.8 })); goalRing.rotation.x = Math.PI / 2; goalRing.position.y = 0.05; goalMarker.userData.ring = goalRing; arenaGroup.add(goalRing);
   const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: '#8ea8ca', size: 0.035, transparent: true, opacity: 0.55 }));
   const starPositions = []; for (let i = 0; i < 180; i++) { const angle = Math.random() * Math.PI * 2; const radius = 7 + Math.random() * 7; starPositions.push(Math.cos(angle) * radius, 1.5 + Math.random() * 6, Math.sin(angle) * radius); }
   points.geometry.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3)); arenaGroup.add(points);
@@ -107,7 +110,8 @@ function createFlyVisual(agent) {
   const eyeR = eyeL.clone(); eyeR.position.x = 0.11; group.add(eyeR);
   const selection = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.018, 8, 32), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.8 })); selection.rotation.x = Math.PI / 2; selection.position.y = -0.12; group.add(selection);
   const label = labelSprite(agent.name, color); label.position.set(0, 0.6, 0); group.add(label);
-  group.userData = { agentId: agent.id, body, leftWing, rightWing, selection, label, color };
+  const puffGroup = new THREE.Group(); puffGroup.position.set(0, 0.12, 0.42); puffGroup.visible = false; for (let i = 0; i < 3; i++) { const puffMaterial = new THREE.MeshBasicMaterial({ color: '#b6f36b', transparent: true, opacity: 0.0, depthWrite: false }); const puff = new THREE.Mesh(new THREE.SphereGeometry(0.10 + i * 0.025, 10, 8), puffMaterial); puff.position.set(i * 0.08, i * 0.04, i * 0.06); puffGroup.add(puff); } group.add(puffGroup);
+  group.userData = { agentId: agent.id, body, leftWing, rightWing, selection, label, puffGroup, color };
   scene.add(group); return group;
 }
 
@@ -133,7 +137,9 @@ function syncScene() {
     let trail = trailLines.get(agent.id);
     if (!trail) { const geometry = new THREE.BufferGeometry(); geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(36 * 3), 3)); const material = new THREE.LineBasicMaterial({ color: agent.selected ? '#ffffff' : visual.userData.color, transparent: true, opacity: agent.selected ? 0.65 : 0.25 }); trail = new THREE.Line(geometry, material); trail.frustumCulled = false; scene.add(trail); trailLines.set(agent.id, trail); }
     const positions = trail.geometry.attributes.position.array; for (let i = 0; i < 36; i++) { const point = history[Math.max(0, history.length - 36 + i)] || agent.position; positions[i * 3] = point[0]; positions[i * 3 + 1] = point[2] + 0.04; positions[i * 3 + 2] = point[1]; } trail.geometry.attributes.position.needsUpdate = true;
+    const puffGroup = visual.userData.puffGroup; const puffLevel = agent.puff_level; puffGroup.visible = puffLevel > 0.02; if (puffGroup.visible) { const drift = 1 - puffLevel; puffGroup.scale.setScalar(0.55 + drift * 2.1); puffGroup.position.set(drift * 0.5, 0.1 + drift * 0.35, 0.4 + drift * 0.5); puffGroup.children.forEach((puff, puffIndex) => { puff.material.opacity = puffLevel * (0.55 - puffIndex * 0.12); puff.position.x = puffIndex * 0.09 * (1 + drift) + Math.sin(performance.now() * 0.005 + puffIndex) * 0.05; puff.position.z = puffIndex * 0.07 + drift * 0.3; }); }
   });
+  if (goalMarker && state.data.adventure) { const quest = state.data.adventure.id !== 'free_flight'; goalMarker.visible = quest; goalMarker.userData.ring.visible = quest; if (quest) { goalMarker.position.set(state.data.adventure.target[0], 0.32, state.data.adventure.target[1]); goalMarker.userData.ring.position.set(state.data.adventure.target[0], 0.06, state.data.adventure.target[1]); const pulse = 1 + Math.sin(performance.now() * 0.006) * 0.18; goalMarker.scale.setScalar(pulse); goalMarker.userData.ring.scale.setScalar(pulse); } }
 }
 
 async function command(action, payload = {}) { await fetch('/api/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...payload }) }); await refresh(); }
@@ -155,7 +161,12 @@ function renderPanels() {
   const agent = data.agents.find((item) => item.id === state.selected) || data.agents[0]; if (!agent) return;
   $('selected-name').textContent = agent.name; $('selected-channel').textContent = agent.channel; $('input-value').textContent = agent.input_level.toFixed(2); $('reaction-value').textContent = agent.reaction_level.toFixed(2); $('nt-value').textContent = agent.neurotransmitter; $('energy-value').textContent = agent.energy.toFixed(2); $('input-meter').style.width = `${agent.input_level * 100}%`; $('reaction-meter').style.width = `${agent.reaction_level * 100}%`; $('hormone-meter').style.width = `${agent.hormone_level * 100}%`; $('energy-meter').style.width = `${agent.energy * 100}%`; $('speed').value = data.speed; $('speed-value').textContent = `${data.speed.toFixed(2)}×`; $('decay').value = data.decay; $('decay-value').textContent = data.decay.toFixed(2); $('hormone-toggle').textContent = agent.hormone_enabled ? 'ON' : 'OFF'; $('signal-bar').style.width = `${agent.input_level * 100}%`; $('reaction-bar').style.width = `${agent.reaction_level * 100}%`; $('hormone-bar').style.width = `${agent.hormone_level * 100}%`;
   $('drive').textContent = `${intentLabel(agent.drive)} · ${agent.drive}`; $('decision').textContent = intentLabel(agent.decision); $('attention').textContent = agent.attention; $('confidence').textContent = `confidence ${Math.round(agent.confidence * 100)}%`;
+  $('adventure-name').textContent = data.adventure.name; $('adventure-objective').textContent = data.adventure.objective; $('adventure-score').textContent = `score ${data.adventure.score}`; $('adventure-progress').value = data.adventure.progress; $('adventure-select').value = data.adventure.id;
+  $('strategy-value').textContent = agent.strategy; $('reward-value').textContent = `${Math.round(agent.reward * 100)}%`; $('novelty-value').textContent = `${Math.round(agent.novelty * 100)}%`; $('puff-value').textContent = `${agent.puff_count} (${data.metrics.total_puff_events})`; $('learning-value').textContent = String(data.metrics.learning_updates);
 }
 function render3D() { if (!renderer) return; syncScene(); sensorGroup.rotation.y += 0.0015; renderer.render(scene, camera); requestAnimationFrame(render3D); }
 $('pause').addEventListener('click', () => command(state.data && state.data.running ? 'pause' : 'resume')); $('reset').addEventListener('click', () => command('reset')); $('add-fly').addEventListener('click', () => command('add')); $('speed').addEventListener('input', (event) => command('speed', { value: Number(event.target.value) })); $('decay').addEventListener('input', (event) => command('decay', { value: Number(event.target.value) })); $('hormone-toggle').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('hormone', { id: agent.id, enabled: !agent.hormone_enabled }); }); $('open-bridge').addEventListener('click', () => window.alert('Для полной 3D-сцены запусти: scripts/run_demo.ps1 -WithBlender'));
+$('adventure-select').addEventListener('change', (event) => command('adventure', { name: event.target.value }));
+$('reward-button').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('reward', { id: agent.id }); });
+$('puff-button').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('puff', { id: agent.id }); });
 init3D(); refresh(); setInterval(refresh, 100); requestAnimationFrame(render3D); window.addEventListener('resize', resizeCanvas);

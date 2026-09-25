@@ -47,6 +47,12 @@ pub struct AgentSnapshot {
     pub decision: String,
     pub attention: String,
     pub confidence: f32,
+    pub puff_level: f32,
+    pub puff_count: u64,
+    pub puff_enabled: bool,
+    pub reward: f32,
+    pub novelty: f32,
+    pub strategy: String,
     pub hormone_level: f32,
     pub hormone_enabled: bool,
     pub channel: String,
@@ -58,9 +64,21 @@ pub struct EditorMetrics {
     pub fps: f32,
     pub total_reactions: u64,
     pub total_hormone_pulses: u64,
+    pub total_puff_events: u64,
+    pub learning_updates: u64,
     pub active_flies: usize,
     pub sim_time: f32,
     pub fixed_timestep_ms: f32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AdventureSnapshot {
+    pub id: String,
+    pub name: String,
+    pub objective: String,
+    pub progress: f32,
+    pub score: u32,
+    pub target: [f32; 2],
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -71,6 +89,7 @@ pub struct EditorSnapshot {
     pub decay: f32,
     pub selected_fly: Option<u32>,
     pub agents: Vec<AgentSnapshot>,
+    pub adventure: AdventureSnapshot,
     pub metrics: EditorMetrics,
     pub model_note: String,
 }
@@ -80,6 +99,7 @@ struct Command {
     action: String,
     id: Option<u32>,
     value: Option<f32>,
+    name: Option<String>,
     enabled: Option<bool>,
 }
 
@@ -98,6 +118,13 @@ struct Agent {
     odor: f32,
     touch: f32,
     temperature: f32,
+    puff_level: f32,
+    puff_count: u64,
+    puff_enabled: bool,
+    puff_just_started: bool,
+    reward: f32,
+    novelty: f32,
+    strategy: &'static str,
     hormone_level: f32,
     hormone_enabled: bool,
     channel: &'static str,
@@ -130,6 +157,13 @@ impl Agent {
             odor: 0.5,
             touch: 0.0,
             temperature: 0.5,
+            puff_level: 0.0,
+            puff_count: 0,
+            puff_enabled: true,
+            puff_just_started: false,
+            reward: 0.0,
+            novelty: 0.5,
+            strategy: "balanced",
             hormone_level: 0.0,
             hormone_enabled: index.is_multiple_of(2),
             channel: if index == 0 { "input" } else { "internal" },
@@ -180,6 +214,24 @@ impl Agent {
         } else {
             self.hormone_level = (self.hormone_level * 0.9).clamp(0.0, 1.0);
         }
+        self.puff_just_started = false;
+        let cycle = (time * speed * 0.55 + self.id as f32 * 1.9).rem_euclid(6.0);
+        let nervous = (phase.sin() * 0.5 + 0.5) * self.stress;
+        if self.puff_enabled && (cycle < dt * 1.5 || nervous > 0.85) && self.puff_level < 0.25 {
+            self.puff_count = self.puff_count.saturating_add(1);
+            self.puff_level = 1.0;
+            self.puff_just_started = true;
+            self.stress = (self.stress + 0.04).min(1.0);
+        }
+        self.puff_level = (self.puff_level - dt * 0.5).clamp(0.0, 1.0);
+        self.novelty = (self.novelty * 0.97 + (1.0 - self.reward) * dt * 0.02).clamp(0.0, 1.0);
+        self.strategy = if self.reward > 0.6 {
+            "exploit_reward"
+        } else if self.novelty > 0.68 {
+            "explore_novelty"
+        } else {
+            "balanced"
+        };
     }
 
     fn intent(&self) -> (&'static str, &'static str, f32) {
@@ -206,6 +258,15 @@ impl Agent {
     }
 }
 
+fn adventure_spec(id: &str) -> (&'static str, &'static str) {
+    match id {
+        "odor_trail" => ("odor_trail", "Следуй за подвижным запахом"),
+        "ring_circuit" => ("ring_circuit", "Пролети кольцо арены три раза"),
+        "hormone_calibration" => ("hormone_calibration", "Собери сигнал и выпусти гормон"),
+        _ => ("free_flight", "Свободный полёт и исследование"),
+    }
+}
+
 pub struct EditorRuntime {
     agents: Vec<Agent>,
     selected: Option<u32>,
@@ -216,6 +277,11 @@ pub struct EditorRuntime {
     tick: u64,
     total_reactions: u64,
     total_hormones: u64,
+    total_puffs: u64,
+    learning_updates: u64,
+    adventure_id: String,
+    adventure_score: u32,
+    adventure_target: [f32; 2],
 }
 
 impl EditorRuntime {
@@ -235,7 +301,24 @@ impl EditorRuntime {
             tick: 0,
             total_reactions: 0,
             total_hormones: 0,
+            total_puffs: 0,
+            learning_updates: 0,
+            adventure_id: "free_flight".to_owned(),
+            adventure_score: 0,
+            adventure_target: [0.0, 0.0],
         }
+    }
+
+    fn update_adventure_target(&mut self) {
+        self.adventure_target = match self.adventure_id.as_str() {
+            "odor_trail" => [
+                (self.time * 0.8).sin() * 4.0,
+                (self.time * 0.55).cos() * 2.2,
+            ],
+            "ring_circuit" => [(self.time * 1.2).cos() * 3.8, (self.time * 1.2).sin() * 2.4],
+            "hormone_calibration" => [(self.time * 0.4).sin() * 3.0, (self.time * 0.6).cos() * 2.0],
+            _ => [0.0, 0.0],
+        };
     }
 
     pub fn step(&mut self, dt: f32) {
@@ -244,11 +327,25 @@ impl EditorRuntime {
         }
         self.time += dt * self.speed;
         self.tick += 1;
+        self.update_adventure_target();
+        let target = self.adventure_target;
         for agent in &mut self.agents {
             agent.step(self.time, dt, self.speed, self.decay);
             self.total_reactions += 1;
             if agent.hormone_level > 0.25 {
                 self.total_hormones += 1;
+            }
+            if agent.puff_just_started {
+                self.total_puffs = self.total_puffs.saturating_add(1);
+            }
+            if self.adventure_id != "free_flight" {
+                let dx = agent.position[0] - target[0];
+                let dy = agent.position[1] - target[1];
+                if (dx * dx + dy * dy).sqrt() < 0.85 {
+                    self.adventure_score = self.adventure_score.saturating_add(1);
+                    self.learning_updates += 1;
+                    agent.reward = (agent.reward + 0.08).min(1.0);
+                }
             }
         }
     }
@@ -282,6 +379,12 @@ impl EditorRuntime {
                         agent.touch * 100.0
                     ),
                     confidence,
+                    puff_level: agent.puff_level,
+                    puff_count: agent.puff_count,
+                    puff_enabled: agent.puff_enabled,
+                    reward: agent.reward,
+                    novelty: agent.novelty,
+                    strategy: agent.strategy.to_owned(),
                     hormone_level: agent.hormone_level,
                     hormone_enabled: agent.hormone_enabled,
                     channel: agent.channel.to_owned(),
@@ -296,10 +399,23 @@ impl EditorRuntime {
             decay: self.decay,
             selected_fly: self.selected,
             agents,
+            adventure: {
+                let (name, objective) = adventure_spec(&self.adventure_id);
+                AdventureSnapshot {
+                    id: self.adventure_id.clone(),
+                    name: name.to_owned(),
+                    objective: objective.to_owned(),
+                    progress: if self.adventure_id == "free_flight" { 1.0 } else { (self.adventure_score % 100) as f32 / 100.0 },
+                    score: self.adventure_score,
+                    target: self.adventure_target,
+                }
+            },
             metrics: EditorMetrics {
                 fps,
                 total_reactions: self.total_reactions,
                 total_hormone_pulses: self.total_hormones,
+                total_puff_events: self.total_puffs,
+                learning_updates: self.learning_updates,
                 active_flies: self.agents.len(),
                 sim_time: self.time,
                 fixed_timestep_ms: FIXED_DT * 1000.0,
@@ -329,6 +445,37 @@ impl EditorRuntime {
             }
             "decay" => {
                 self.decay = command.value.unwrap_or(self.decay).clamp(0.0, 1.0);
+            }
+            "puff" => {
+                let id = command.id.context("puff requires id")?;
+                let mut changed = false;
+                if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) {
+                    agent.puff_enabled = true;
+                    agent.puff_level = 1.0;
+                    agent.puff_count = agent.puff_count.saturating_add(1);
+                    changed = true;
+                }
+                if changed {
+                    self.total_puffs = self.total_puffs.saturating_add(1);
+                }
+            }
+            "reward" => {
+                let id = command.id.context("reward requires id")?;
+                let mut changed = false;
+                if let Some(agent) = self.agents.iter_mut().find(|agent| agent.id == id) {
+                    agent.reward = (agent.reward + 0.2).min(1.0);
+                    changed = true;
+                }
+                if changed {
+                    self.learning_updates = self.learning_updates.saturating_add(1);
+                }
+            }
+            "adventure" => {
+                let requested = command.name.context("adventure requires name")?;
+                let (id, _) = adventure_spec(&requested);
+                self.adventure_id = id.to_owned();
+                self.adventure_score = 0;
+                self.update_adventure_target();
             }
             "hormone" => {
                 let id = command.id.context("hormone requires id")?;
@@ -567,5 +714,46 @@ mod tests {
                 .expect("agent")
                 .hormone_enabled
         );
+    }
+
+    #[test]
+    fn editor_adventure_puff_and_reward_commands() {
+        let mut runtime = EditorRuntime::new(2);
+        runtime
+            .apply_command(br#"{"action":"adventure","name":"ring_circuit"}"#)
+            .expect("adventure");
+        runtime
+            .apply_command(br#"{"action":"puff","id":1}"#)
+            .expect("puff");
+        runtime
+            .apply_command(br#"{"action":"reward","id":1}"#)
+            .expect("reward");
+        let snapshot = runtime.snapshot(60.0);
+        assert_eq!(snapshot.adventure.id, "ring_circuit");
+        assert!(!snapshot.adventure.objective.is_empty());
+        let agent = snapshot
+            .agents
+            .iter()
+            .find(|agent| agent.id == 1)
+            .expect("agent");
+        assert_eq!(agent.puff_count, 1);
+        assert!(agent.puff_level > 0.5);
+        assert!(agent.reward > 0.0);
+        assert_eq!(snapshot.metrics.total_puff_events, 1);
+        assert_eq!(snapshot.metrics.learning_updates, 1);
+    }
+
+    #[test]
+    fn editor_adventure_target_follows_time() {
+        let mut runtime = EditorRuntime::new(2);
+        runtime
+            .apply_command(br#"{"action":"adventure","name":"odor_trail"}"#)
+            .expect("adventure");
+        let first = runtime.snapshot(60.0).adventure.target;
+        for _ in 0..120 {
+            runtime.step(FIXED_DT);
+        }
+        let second = runtime.snapshot(60.0).adventure.target;
+        assert!((first[0] - second[0]).abs() > 0.001 || (first[1] - second[1]).abs() > 0.001);
     }
 }
