@@ -12,6 +12,7 @@ const SERVER_FPS: f32 = 60.0;
 const FIXED_DT: f32 = 1.0 / SERVER_FPS;
 
 const INDEX_HTML: &str = include_str!("../editor/index.html");
+const THREE_JS: &str = include_str!("../editor/three.min.js");
 const APP_JS: &str = include_str!("../editor/app.js");
 const STYLE_CSS: &str = include_str!("../editor/style.css");
 
@@ -345,6 +346,8 @@ fn serve_client(stream: TcpStream, runtime: &mut EditorRuntime, fps: f32) {
         let (method, path, body) = request;
         let reply = if method == "GET" && path == "/" {
             response("200 OK", "text/html; charset=utf-8", INDEX_HTML)
+        } else if method == "GET" && path == "/three.min.js" {
+            response("200 OK", "text/javascript; charset=utf-8", THREE_JS)
         } else if method == "GET" && path == "/app.js" {
             response("200 OK", "text/javascript; charset=utf-8", APP_JS)
         } else if method == "GET" && path == "/style.css" {
