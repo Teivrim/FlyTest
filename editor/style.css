@@ -91,5 +91,5 @@ input[type=range] { width: 100%; margin: 10px 0 0; accent-color: var(--cyan); }
 .statusbar { justify-content: space-between; min-height: 38px; padding: 0 22px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
 .statusbar > span { display: flex; align-items: center; gap: 7px; }
 .status-light { width: 6px; height: 6px; border-radius: 50%; background: var(--green); box-shadow: 0 0 10px var(--green); }
-@media (max-width: 1050px) { .workspace { grid-template-columns: 210px minmax(360px, 1fr); } .right-panel { grid-column: 1 / -1; } }
+@media (max-width: 850px) { .workspace { grid-template-columns: 210px minmax(360px, 1fr); } .right-panel { grid-column: 1 / -1; } }
 @media (max-width: 700px) { .topbar { padding: 0 14px; } .top-actions .pill { display: none; } .workspace { display: flex; flex-direction: column; padding: 10px; } .left-panel, .right-panel { min-height: auto; } .canvas-wrap, #arena { min-height: 360px; } .statusbar { flex-wrap: wrap; gap: 6px; padding: 9px 14px; } }
