@@ -12,7 +12,9 @@ let cameraAzimuth = 0.72;
 let cameraElevation = 0.48;
 let cameraDistance = 12.5;
 let pointerDown = false;
+let dragDistance = 0;
 let lastPointer = { x: 0, y: 0 };
+let raycaster;
 
 function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char])); }
 
@@ -30,6 +32,7 @@ function init3D() {
   scene.background = new THREE.Color('#070b13');
   scene.fog = new THREE.Fog('#070b13', 12, 26);
   camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
+  raycaster = new THREE.Raycaster();
   updateCamera();
   const hemi = new THREE.HemisphereLight('#b9ddff', '#080b14', 1.5);
   scene.add(hemi);
@@ -39,10 +42,11 @@ function init3D() {
   const violet = new THREE.PointLight('#a98bff', 14, 16, 2); violet.position.set(4, 2, 4); scene.add(violet);
   buildArena();
   resizeCanvas();
-  canvas.addEventListener('pointerdown', (event) => { pointerDown = true; lastPointer = { x: event.clientX, y: event.clientY }; canvas.setPointerCapture(event.pointerId); });
-  canvas.addEventListener('pointermove', (event) => { if (!pointerDown) return; cameraAzimuth -= (event.clientX - lastPointer.x) * 0.008; cameraElevation = Math.max(0.18, Math.min(1.25, cameraElevation + (event.clientY - lastPointer.y) * 0.006)); lastPointer = { x: event.clientX, y: event.clientY }; updateCamera(); });
+  canvas.addEventListener('pointerdown', (event) => { pointerDown = true; dragDistance = 0; lastPointer = { x: event.clientX, y: event.clientY }; canvas.setPointerCapture(event.pointerId); });
+  canvas.addEventListener('pointermove', (event) => { if (!pointerDown) return; const dx = event.clientX - lastPointer.x; const dy = event.clientY - lastPointer.y; dragDistance += Math.abs(dx) + Math.abs(dy); cameraAzimuth -= dx * 0.008; cameraElevation = Math.max(0.18, Math.min(1.25, cameraElevation + dy * 0.006)); lastPointer = { x: event.clientX, y: event.clientY }; updateCamera(); });
   canvas.addEventListener('pointerup', () => { pointerDown = false; });
   canvas.addEventListener('pointercancel', () => { pointerDown = false; });
+  canvas.addEventListener('click', (event) => { if (dragDistance > 6 || !raycaster) return; const rect = canvas.getBoundingClientRect(); const pointer = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1); raycaster.setFromCamera(pointer, camera); const hits = raycaster.intersectObjects([...flyVisuals.values()], true); for (const hit of hits) { let object = hit.object; while (object && object.userData.agentId === undefined) object = object.parent; if (object?.userData.agentId) { state.selected = object.userData.agentId; command('select', { id: state.selected }); break; } } });
   canvas.addEventListener('wheel', (event) => { event.preventDefault(); cameraDistance = Math.max(7, Math.min(22, cameraDistance + event.deltaY * 0.012)); updateCamera(); }, { passive: false });
   return true;
 }
@@ -103,7 +107,7 @@ function createFlyVisual(agent) {
   const eyeR = eyeL.clone(); eyeR.position.x = 0.11; group.add(eyeR);
   const selection = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.018, 8, 32), new THREE.MeshBasicMaterial({ color: '#ffffff', transparent: true, opacity: 0.8 })); selection.rotation.x = Math.PI / 2; selection.position.y = -0.12; group.add(selection);
   const label = labelSprite(agent.name, color); label.position.set(0, 0.6, 0); group.add(label);
-  group.userData = { body, leftWing, rightWing, selection, label, color };
+  group.userData = { agentId: agent.id, body, leftWing, rightWing, selection, label, color };
   scene.add(group); return group;
 }
 
@@ -140,6 +144,8 @@ async function refresh() {
     if (state.data.tick - state.lastUiTick >= 3 || state.lastUiTick < 0) { renderPanels(); state.lastUiTick = state.data.tick; }
   } catch (error) { $('connection').className = 'pill offline'; $('connection').textContent = '● offline'; $('status-text').textContent = 'Runtime недоступен'; }
 }
+const INTENT_LABELS = { explore: 'исследование', approach_odor: 'следовать за запахом', seek_light: 'поиск света', avoid_contact: 'избегание контакта', steer_toward_odor: 'поворот к запаху', break_contact: 'разрыв контакта', climb: 'набор высоты', maintain_course: 'удержание курса' };
+function intentLabel(value) { return INTENT_LABELS[value] || value; }
 function renderPanels() {
   const data = state.data; if (!data) return;
   $('fps').textContent = `${Math.round(data.metrics.fps)} FPS`; $('tick').textContent = `tick ${data.tick}`; $('sim-time').textContent = `t = ${data.metrics.sim_time.toFixed(2)} s`; $('model-label').textContent = 'model: lightweight-policy'; $('pause').textContent = data.running ? 'Пауза' : 'Продолжить';
@@ -148,6 +154,7 @@ function renderPanels() {
   document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); command('remove', { id: Number(button.dataset.remove) }); }));
   const agent = data.agents.find((item) => item.id === state.selected) || data.agents[0]; if (!agent) return;
   $('selected-name').textContent = agent.name; $('selected-channel').textContent = agent.channel; $('input-value').textContent = agent.input_level.toFixed(2); $('reaction-value').textContent = agent.reaction_level.toFixed(2); $('nt-value').textContent = agent.neurotransmitter; $('energy-value').textContent = agent.energy.toFixed(2); $('input-meter').style.width = `${agent.input_level * 100}%`; $('reaction-meter').style.width = `${agent.reaction_level * 100}%`; $('hormone-meter').style.width = `${agent.hormone_level * 100}%`; $('energy-meter').style.width = `${agent.energy * 100}%`; $('speed').value = data.speed; $('speed-value').textContent = `${data.speed.toFixed(2)}×`; $('decay').value = data.decay; $('decay-value').textContent = data.decay.toFixed(2); $('hormone-toggle').textContent = agent.hormone_enabled ? 'ON' : 'OFF'; $('signal-bar').style.width = `${agent.input_level * 100}%`; $('reaction-bar').style.width = `${agent.reaction_level * 100}%`; $('hormone-bar').style.width = `${agent.hormone_level * 100}%`;
+  $('drive').textContent = `${intentLabel(agent.drive)} · ${agent.drive}`; $('decision').textContent = intentLabel(agent.decision); $('attention').textContent = agent.attention; $('confidence').textContent = `confidence ${Math.round(agent.confidence * 100)}%`;
 }
 function render3D() { if (!renderer) return; syncScene(); sensorGroup.rotation.y += 0.0015; renderer.render(scene, camera); requestAnimationFrame(render3D); }
 $('pause').addEventListener('click', () => command(state.data && state.data.running ? 'pause' : 'resume')); $('reset').addEventListener('click', () => command('reset')); $('add-fly').addEventListener('click', () => command('add')); $('speed').addEventListener('input', (event) => command('speed', { value: Number(event.target.value) })); $('decay').addEventListener('input', (event) => command('decay', { value: Number(event.target.value) })); $('hormone-toggle').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('hormone', { id: agent.id, enabled: !agent.hormone_enabled }); }); $('open-bridge').addEventListener('click', () => window.alert('Для полной 3D-сцены запусти: scripts/run_demo.ps1 -WithBlender'));

@@ -1,5 +1,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -37,6 +39,14 @@ pub struct AgentSnapshot {
     pub neurotransmitter: String,
     pub input_level: f32,
     pub reaction_level: f32,
+    pub light: f32,
+    pub odor: f32,
+    pub touch: f32,
+    pub temperature: f32,
+    pub drive: String,
+    pub decision: String,
+    pub attention: String,
+    pub confidence: f32,
     pub hormone_level: f32,
     pub hormone_enabled: bool,
     pub channel: String,
@@ -84,6 +94,10 @@ struct Agent {
     neurotransmitter: &'static str,
     input_level: f32,
     reaction_level: f32,
+    light: f32,
+    odor: f32,
+    touch: f32,
+    temperature: f32,
     hormone_level: f32,
     hormone_enabled: bool,
     channel: &'static str,
@@ -112,6 +126,10 @@ impl Agent {
             neurotransmitter: ["ACH", "GABA", "GLUT"][index % 3],
             input_level: 0.5,
             reaction_level: 0.5,
+            light: 0.5,
+            odor: 0.5,
+            touch: 0.0,
+            temperature: 0.5,
             hormone_level: 0.0,
             hormone_enabled: index.is_multiple_of(2),
             channel: if index == 0 { "input" } else { "internal" },
@@ -120,36 +138,71 @@ impl Agent {
 
     fn step(&mut self, time: f32, dt: f32, speed: f32, decay: f32) {
         let phase = time * 0.9 + self.id as f32 * 1.31;
-        let light = (0.5 + 0.35 * (time * 0.7).sin()).clamp(0.0, 1.0);
-        let odor = (0.5 + 0.3 * (time * 0.43 + self.id as f32 * 0.17).sin()).clamp(0.0, 1.0);
-        let touch = (self.velocity[0].abs() + self.velocity[1].abs()).clamp(0.0, 1.0);
-        let temperature = (0.5 + 0.15 * (time * 0.2).sin()).clamp(0.0, 1.0);
-        self.input_level = (light * 0.35 + odor * 0.45 + touch * 0.2).clamp(0.0, 1.0);
-        let turn = ((odor - 0.5) * 1.4 + (light - 0.5) * 0.3 - touch * 0.55).clamp(-1.0, 1.0);
-        let throttle = (0.22 + light * 0.3 + self.energy * 0.2).clamp(0.0, 1.0);
-        let vertical = ((temperature - 0.5) * 0.4).clamp(-1.0, 1.0);
+        self.light = (0.5 + 0.35 * (time * 0.7).sin()).clamp(0.0, 1.0);
+        self.odor = (0.5 + 0.3 * (time * 0.43 + self.id as f32 * 0.17).sin()).clamp(0.0, 1.0);
+        self.temperature = (0.5 + 0.15 * (time * 0.2).sin()).clamp(0.0, 1.0);
+        let boundary = ((self.position[0].abs() - 4.5).max(0.0)
+            + (self.position[1].abs() - 2.8).max(0.0))
+        .clamp(0.0, 1.0);
+        self.touch = ((self.velocity[0].abs() + self.velocity[1].abs()) * 0.2 + boundary * 0.8)
+            .clamp(0.0, 1.0);
+        self.input_level =
+            (self.light * 0.35 + self.odor * 0.45 + self.touch * 0.2).clamp(0.0, 1.0);
+        let turn = ((self.odor - 0.5) * 1.4 + (self.light - 0.5) * 0.3 - self.touch * 0.8)
+            .clamp(-1.0, 1.0);
+        let throttle = (0.22 + self.light * 0.3 + self.energy * 0.2).clamp(0.0, 1.0);
         let wave = (0.5 + 0.5 * (phase * 2.0).sin()) * 0.5 + 0.5;
         let reaction = (turn * 0.5 + wave * 0.5).abs() * decay;
         self.reaction_level = reaction.clamp(0.0, 1.0);
 
-        self.velocity[0] += turn * dt * 1.6 * speed;
-        self.velocity[1] += throttle * dt * 0.75 * speed;
-        self.velocity[2] += vertical * dt * 0.35 * speed;
-        for axis in 0..3 {
-            self.velocity[axis] *= 0.965;
+        let desired_x = (self.odor - 0.5) * 2.4 + (time * 0.35 + self.id as f32).sin() * 0.9
+            - self.position[0] * 0.08;
+        let desired_y = (self.light - 0.5) * 1.6 + (time * 0.27 + self.id as f32 * 1.7).cos() * 0.7
+            - self.position[1] * 0.1;
+        let desired_z = 1.25 + (time * 0.8 + self.id as f32).sin() * 0.45;
+        let desired = [desired_x, desired_y, desired_z];
+        for (axis, target) in desired.iter().enumerate() {
+            self.velocity[axis] += (*target - self.velocity[axis]) * dt * 2.4 * speed;
             self.position[axis] += self.velocity[axis] * dt * speed;
         }
-        self.position[0] = self.position[0].clamp(-5.5, 5.5);
-        self.position[1] = self.position[1].clamp(-3.5, 3.5);
-        self.position[2] = (self.position[2] + self.velocity[2] * dt).clamp(0.6, 3.0);
+        for (axis, limit) in [(0, 5.5), (1, 3.5)] {
+            if self.position[axis].abs() > limit {
+                self.position[axis] = self.position[axis].clamp(-limit, limit);
+                self.velocity[axis] *= -0.45;
+            }
+        }
+        self.position[2] = self.position[2].clamp(0.6, 3.0);
         self.energy = (self.energy - dt * speed * (0.001 + throttle * 0.0015)).clamp(0.0, 1.0);
-        self.stress = (self.stress * 0.985 + touch * dt * 0.015).clamp(0.0, 1.0);
+        self.stress = (self.stress * 0.985 + self.touch * dt * 0.015).clamp(0.0, 1.0);
         if self.hormone_enabled {
-            let target = ((odor - 0.55).max(0.0) * 0.8 + self.stress * 0.4).clamp(0.0, 1.0);
+            let target = ((self.odor - 0.55).max(0.0) * 0.8 + self.stress * 0.4).clamp(0.0, 1.0);
             self.hormone_level = (self.hormone_level * 0.93 + target * 0.07).clamp(0.0, 1.0);
         } else {
             self.hormone_level = (self.hormone_level * 0.9).clamp(0.0, 1.0);
         }
+    }
+
+    fn intent(&self) -> (&'static str, &'static str, f32) {
+        let drive = if self.touch > 0.35 {
+            "avoid_contact"
+        } else if self.odor > 0.62 {
+            "approach_odor"
+        } else if self.light > 0.72 {
+            "seek_light"
+        } else {
+            "explore"
+        };
+        let decision = if self.touch > 0.35 {
+            "break_contact"
+        } else if self.odor > 0.62 {
+            "steer_toward_odor"
+        } else if self.position[2] < 0.85 {
+            "climb"
+        } else {
+            "maintain_course"
+        };
+        let confidence = (0.45 + self.input_level * 0.45 + self.energy * 0.1).clamp(0.0, 1.0);
+        (drive, decision, confidence)
     }
 }
 
@@ -204,20 +257,36 @@ impl EditorRuntime {
         let agents = self
             .agents
             .iter()
-            .map(|agent| AgentSnapshot {
-                id: agent.id,
-                name: agent.name.clone(),
-                position: agent.position,
-                velocity: agent.velocity,
-                energy: agent.energy,
-                stress: agent.stress,
-                neurotransmitter: agent.neurotransmitter.to_owned(),
-                input_level: agent.input_level,
-                reaction_level: agent.reaction_level,
-                hormone_level: agent.hormone_level,
-                hormone_enabled: agent.hormone_enabled,
-                channel: agent.channel.to_owned(),
-                selected: self.selected == Some(agent.id),
+            .map(|agent| {
+                let (drive, decision, confidence) = agent.intent();
+                AgentSnapshot {
+                    id: agent.id,
+                    name: agent.name.clone(),
+                    position: agent.position,
+                    velocity: agent.velocity,
+                    energy: agent.energy,
+                    stress: agent.stress,
+                    neurotransmitter: agent.neurotransmitter.to_owned(),
+                    input_level: agent.input_level,
+                    reaction_level: agent.reaction_level,
+                    light: agent.light,
+                    odor: agent.odor,
+                    touch: agent.touch,
+                    temperature: agent.temperature,
+                    drive: drive.to_owned(),
+                    decision: decision.to_owned(),
+                    attention: format!(
+                        "odor {:.0}% · light {:.0}% · touch {:.0}%",
+                        agent.odor * 100.0,
+                        agent.light * 100.0,
+                        agent.touch * 100.0
+                    ),
+                    confidence,
+                    hormone_level: agent.hormone_level,
+                    hormone_enabled: agent.hormone_enabled,
+                    channel: agent.channel.to_owned(),
+                    selected: self.selected == Some(agent.id),
+                }
             })
             .collect();
         EditorSnapshot {
@@ -270,7 +339,7 @@ impl EditorRuntime {
             }
             "add" => {
                 if self.agents.len() < MAX_FLIES {
-                    let id = self.agents.len() as u32 + 1;
+                    let id = self.agents.iter().map(|agent| agent.id).max().unwrap_or(0) + 1;
                     self.agents.push(Agent::new(id, self.agents.len()));
                     self.selected = Some(id);
                 }
@@ -329,7 +398,7 @@ fn read_request<R: BufRead>(reader: &mut R) -> Result<Option<(String, String, Ve
     Ok(Some((method, path, body)))
 }
 
-fn serve_client(stream: TcpStream, runtime: &mut EditorRuntime, fps: f32) {
+fn serve_client(stream: TcpStream, runtime: &Arc<Mutex<EditorRuntime>>, fps: f32) {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
     let Ok(read_stream) = stream.try_clone() else {
@@ -353,7 +422,11 @@ fn serve_client(stream: TcpStream, runtime: &mut EditorRuntime, fps: f32) {
         } else if method == "GET" && path == "/style.css" {
             response("200 OK", "text/css; charset=utf-8", STYLE_CSS)
         } else if method == "GET" && path == "/api/state" {
-            match serde_json::to_string(&runtime.snapshot(fps)) {
+            let snapshot = runtime
+                .lock()
+                .expect("editor runtime lock poisoned")
+                .snapshot(fps);
+            match serde_json::to_string(&snapshot) {
                 Ok(value) => response("200 OK", "application/json; charset=utf-8", &value),
                 Err(error) => response(
                     "500 Internal Server Error",
@@ -364,7 +437,12 @@ fn serve_client(stream: TcpStream, runtime: &mut EditorRuntime, fps: f32) {
         } else if method == "GET" && path == "/api/config" {
             let config = EditorConfig {
                 port: DEFAULT_PORT,
-                flies: runtime.snapshot(fps).agents.len(),
+                flies: runtime
+                    .lock()
+                    .expect("editor runtime lock poisoned")
+                    .snapshot(fps)
+                    .agents
+                    .len(),
                 max_flies: MAX_FLIES,
                 server_fps: SERVER_FPS as u32,
                 model: "lightweight-policy".to_owned(),
@@ -379,7 +457,11 @@ fn serve_client(stream: TcpStream, runtime: &mut EditorRuntime, fps: f32) {
                 ),
             }
         } else if method == "POST" && path == "/api/command" {
-            match runtime.apply_command(&body) {
+            match runtime
+                .lock()
+                .expect("editor runtime lock poisoned")
+                .apply_command(&body)
+            {
                 Ok(action) => response(
                     "200 OK",
                     "application/json",
@@ -402,7 +484,7 @@ pub fn serve(port: u16, flies: usize) -> Result<()> {
     let listener = TcpListener::bind(("127.0.0.1", port))
         .with_context(|| format!("binding FlyEditor to http://127.0.0.1:{port}"))?;
     listener.set_nonblocking(true)?;
-    let mut runtime = EditorRuntime::new(flies);
+    let runtime = Arc::new(Mutex::new(EditorRuntime::new(flies)));
     println!("FlyEditor: http://127.0.0.1:{port}");
     println!("Press Ctrl+C to stop.");
     let mut previous = Instant::now();
@@ -417,19 +499,73 @@ pub fn serve(port: u16, flies: usize) -> Result<()> {
         }
         accumulator = (accumulator + elapsed).min(FIXED_DT * 4.0);
         while accumulator >= FIXED_DT {
-            runtime.step(FIXED_DT);
+            runtime
+                .lock()
+                .expect("editor runtime lock poisoned")
+                .step(FIXED_DT);
             accumulator -= FIXED_DT;
         }
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
                     let _ = stream.set_nonblocking(false);
-                    serve_client(stream, &mut runtime, fps);
+                    let client_runtime = Arc::clone(&runtime);
+                    let client_fps = fps;
+                    thread::spawn(move || serve_client(stream, &client_runtime, client_fps));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) => return Err(error.into()),
             }
         }
         std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn editor_flies_keep_moving_and_expose_intent() {
+        let mut runtime = EditorRuntime::new(3);
+        for _ in 0..600 {
+            runtime.step(FIXED_DT);
+        }
+        let snapshot = runtime.snapshot(60.0);
+        assert_eq!(snapshot.agents.len(), 3);
+        assert!(
+            snapshot
+                .agents
+                .iter()
+                .all(|agent| agent.position.iter().all(|value| value.is_finite()))
+        );
+        assert!(
+            snapshot
+                .agents
+                .iter()
+                .all(|agent| !agent.drive.is_empty() && !agent.decision.is_empty())
+        );
+        assert!(snapshot.metrics.total_reactions > 0);
+    }
+
+    #[test]
+    fn editor_switches_and_toggles_selected_agent() {
+        let mut runtime = EditorRuntime::new(3);
+        runtime
+            .apply_command(br#"{"action":"select","id":2}"#)
+            .expect("select");
+        runtime
+            .apply_command(br#"{"action":"hormone","id":2,"enabled":false}"#)
+            .expect("hormone");
+        let snapshot = runtime.snapshot(60.0);
+        assert_eq!(snapshot.selected_fly, Some(2));
+        assert!(
+            !snapshot
+                .agents
+                .iter()
+                .find(|agent| agent.id == 2)
+                .expect("agent")
+                .hormone_enabled
+        );
     }
 }

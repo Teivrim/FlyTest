@@ -78,6 +78,11 @@ h1 { font-size: 24px; } h2 { font-size: 17px; }
 .meter { height: 4px; overflow: hidden; border-radius: 99px; background: rgba(255,255,255,.08); }
 .meter i { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--cyan); transition: width .15s; }
 .reaction-meter i { background: var(--violet); } .hormone-meter i { background: var(--orange); } .energy-meter i { background: var(--green); }
+.readout { margin-top: 17px; padding: 11px; border: 1px solid rgba(84,215,232,.24); border-radius: 10px; background: linear-gradient(135deg, rgba(84,215,232,.08), rgba(169,139,255,.05)); }
+.readout-head { display: flex; justify-content: space-between; color: var(--cyan); font-size: 9px; letter-spacing: .13em; }
+.readout strong { display: block; margin-top: 9px; color: #e9f7ff; font-size: 14px; }
+.readout p { margin: 4px 0 0; color: var(--violet); font: 10px ui-monospace, SFMono-Regular, Consolas, monospace; }
+.readout small { display: block; margin-top: 7px; color: var(--muted); font-size: 9px; }
 .control-block { margin-top: 19px; }
 .control-block label { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
 output { color: var(--text); }
