@@ -1183,11 +1183,18 @@ function drawCourses() {
       scenery = new THREE.Group();
       scenery.userData.key = key;
       for (const wall of course.walls) {
+        // Standing on the stage top, not inside the stage.
+        //
+        // The stage is a raised disc: its top is at `stage_height` above the tent
+        // floor, and a wall whose centre is placed at the floor ends up entirely
+        // under the disc. Which is where they were, and the disc hid every one of
+        // them, so the maze was drawn, collided with, and invisible.
+        const tall = Math.max(0.18, height * 1.3);
         const slab = new THREE.Mesh(
-          new THREE.BoxGeometry(wall.half_len * 2, height * 0.66, wall.half_thick * 2),
-          material('#243349', act.color, 0.35)
+          new THREE.BoxGeometry(wall.half_len * 2, tall, wall.half_thick * 2),
+          material('#2c3d59', act.color, 0.45)
         );
-        slab.position.set(ox + wall.x, height * 0.33, oz + wall.z);
+        slab.position.set(ox + wall.x, height + tall * 0.5, oz + wall.z);
         slab.rotation.y = -wall.angle;
         slab.castShadow = true;
         slab.receiveShadow = true;
@@ -1210,6 +1217,7 @@ function drawCourses() {
       scene.add(food);
       courseFood.set(course.act, food);
 
+
       for (const [id, line] of courseTrails) {
         if (line.userData.act !== course.act) continue;
         scene.remove(line);
@@ -1224,7 +1232,7 @@ function drawCourses() {
     if (food) {
       food.visible = !eaten;
       if (!eaten) {
-        food.position.set(ox + course.food[0], height + 0.02, oz + course.food[1]);
+        food.position.set(ox + course.food[0], height, oz + course.food[1]);
         food.scale.setScalar(1 + Math.sin(performance.now() * 0.005 + course.act) * 0.16);
       }
     }
