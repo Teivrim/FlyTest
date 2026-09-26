@@ -144,6 +144,17 @@ h1 { font-size: 24px; } h2 { font-size: 17px; }
 .social-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 6px; margin-top: 5px; color: var(--muted); font-size: 9px; }
 .social-row b { color: #eafffb; font-weight: 600; }
 .social-row .meter { height: 3px; }
+.posture-block { margin-top: 12px; }
+.posture-gauges { display: grid; gap: 3px; margin-top: 6px; }
+.posture-gauges > div { display: grid; grid-template-columns: 44px 1fr; align-items: center; gap: 5px; }
+.posture-gauges span { color: var(--muted); font-size: 8px; }
+/* The spine and the lean run negative to positive, so their meters are drawn
+   from the centre outwards rather than from the left. */
+.meter.centre { position: relative; background: rgba(255,255,255,.07); }
+.meter.centre::before { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: rgba(255,255,255,.22); }
+.meter.centre > i { position: absolute; top: 0; bottom: 0; }
+.meter.centre > i.to-left { right: 50%; }
+.meter.centre > i.to-right { left: 50%; }
 
 /* ---- act list ---- */
 .acts-block { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--line); }

@@ -330,6 +330,9 @@ typedef struct {
      * rather than decoration painted over it. */
     float blink;      /* 1 fully closed, 0 wide open */
     float blink_rate; /* urgency of the next blink */
+    float eye_open;   /* voluntary, 1 wide open, 0 deliberately shut */
+    float wake_timer; /* seconds since waking, drives the waking sequence */
+    float eye_adapt;  /* pupil light adaptation, 0 dark .. 1 bright */
     float gaze_x;     /* -1 left .. 1 right */
     float gaze_y;     /* -1 down .. 1 up */
     float pupil;      /* dilation, 0.5 constricted .. 1.6 wide */
@@ -339,6 +342,15 @@ typedef struct {
     float blush;      /* 0..1 */
     float tears;      /* 0..1, builds while sad */
     float sweat;      /* 0..1, builds while nervous */
+
+    /* ---- posture ----
+     * How she holds her body, as opposed to how her face looks. A character
+     * who is frightened curls up and a character who is proud stands tall, and
+     * neither of those is legible from the face alone. The rig binds the
+     * spine, shoulders and hips to these three. */
+    float spine;    /* -1 curled in .. 1 stretched up */
+    float shoulder; /* 0 down .. 1 shrugged up */
+    float lean;     /* -1 leaning back .. 1 leaning forward */
 
     /* ---- gesture and bond ---- */
     int gesture;            /* current T_GES_* */
@@ -362,6 +374,16 @@ typedef struct {
     float mate_quality;   /* 0..1                              */
     float rival_pressure; /* 0..1                              */
     float predator_risk;  /* 0..1                              */
+
+    /* ---- what she is looking at ----
+     * Kept apart from the motor attractor on purpose. The attractor says
+     * where a fly should travel and fights anything that disagrees; the gaze
+     * says where her eyes should point and must be able to override the
+     * motor target without disturbing it, because a character will happily
+     * walk somewhere while watching somebody else do the walking. */
+    float look_x;    /* -1 left .. 1 right */
+    float look_y;    /* -1 down .. 1 up */
+    float look_lock; /* 0 nothing in particular .. 1 something specific */
 
     /* bookkeeping */
     unsigned rng;
@@ -1436,6 +1458,20 @@ static inline void TUpdate(TFLY *fly, float dt) {
      * after the first greeting. */
     fly->encounter_cool = TMax(0.0f, fly->encounter_cool - dt);
 
+    /* ---- startle wakes her ----
+     * A startle reflex that only lifted the eyelids would be worse than
+     * useless on a sleeping fly: her eyes would fly open and then, as the
+     * surprise decayed, close again, because nothing had actually woken her.
+     * Arousal has to reach the sleep state, or the deliberate opening
+     * sequence that follows has nothing to be deliberate about. */
+    if (fly->asleep && fly->emotion[T_EMO_SURPRISE] > 0.75f) {
+        fly->asleep = 0;
+        fly->drive[T_DRIVE_SLEEP] = 0.0f;
+        fly->wake_timer = 0.0f;
+        fly->energy = TClamp(fly->energy + 0.02f, 0.0f, 1.0f);
+        fly->stress = TClamp(fly->stress + 0.1f, 0.0f, 1.0f);
+    }
+
     /* ---- the face ----
      * Every channel here is derived from the fly's own state, so the rig never
      * has to invent an expression. Eyes first, because a character looks at
@@ -1455,19 +1491,52 @@ static inline void TUpdate(TFLY *fly, float dt) {
         float drowsy = 1.0f - fly->energy;
         float want_rate = 0.35f + 0.5f * drowsy - 0.25f * (face_fear + fly->emotion[T_EMO_SURPRISE]);
         fly->blink_rate = TClamp(want_rate, 0.05f, 1.5f);
+
+        /* --- the voluntary lid ---
+         * `blink` is a reflex and `eye_open` is a decision, and they stay
+         * separate channels because they answer different questions. The
+         * reflex keeps the eye from drying out; the decision is what lets a
+         * character open her eyes on purpose. The lid shuts if either one
+         * wants it shut, so the rig only ever reads the union. */
+        fly->wake_timer = fly->asleep ? 0.0f : (fly->wake_timer + dt);
         if (fly->asleep) {
-            fly->blink = TExp(fly->blink, 1.0f, 0.1f, dt);
+            /* Shutting is quicker than opening, which is what makes a
+             * character look like she is drifting off rather than blinking. */
+            fly->eye_open = TExp(fly->eye_open, 0.0f, 0.12f, dt);
         } else {
+            fly->eye_open = TExp(fly->eye_open, 1.0f, 0.20f, dt);
+        }
+
+        /* Waking is a sequence, not a snap. For the first second and a half
+         * she rubs the sleep out with a few slow partial blinks, the way you
+         * do, and only then does she look properly awake. */
+        float waking = TClamp(1.0f - fly->wake_timer / 1.4f, 0.0f, 1.0f);
+        float wake_rub = (fly->wake_timer < 1.4f && !fly->asleep)
+                             ? 0.5f + 0.5f * sinf(fly->wake_timer * 9.0f)
+                             : 0.0f;
+        /* Squinting against the light, then adapting to it. */
+        fly->eye_adapt = TExp(fly->eye_adapt,
+                              TClamp(1.0f - fly->sensory[T_DARK], 0.0f, 1.0f), 0.5f, dt);
+        float squint = waking * (1.0f - fly->eye_adapt) * 0.5f;
+
+        float lid_want = TMax(1.0f - fly->eye_open, waking * wake_rub * 0.7f);
+        if (!fly->asleep) {
             float period = 2.6f / fly->blink_rate;
             float in_cycle = fmodf(fly->age, period) / period;
             float closed = (in_cycle < 0.15f) ? 1.0f : 0.0f;
             /* Surprise holds the lids open rather than letting them blink. */
             if (fly->emotion[T_EMO_SURPRISE] > 0.6f) closed = 0.0f;
-            fly->blink = TExp(fly->blink, closed, 0.05f, dt);
+            lid_want = TMax(lid_want, closed);
         }
-        if (face_pain > 0.5f) fly->blink = TClamp(fly->blink + 0.4f, 0.0f, 1.0f);
+        lid_want = TMax(lid_want, squint);
+        /* Startle overrides everything: whatever she was doing, a sudden
+         * fright makes her eyes fly open. */
+        if (fly->emotion[T_EMO_SURPRISE] > 0.75f) lid_want = 0.0f;
+        if (face_pain > 0.5f) lid_want = TMax(lid_want, 0.85f);
+        fly->blink = TExp(fly->blink, TClamp(lid_want, 0.0f, 1.0f), 0.05f, dt);
 
-        /* Gaze: a mate, a rival, a threat, or a drift when nothing matters. */
+        /* Gaze: a mate, a rival, a threat, someone she has decided to look
+         * at, or a drift when nothing matters. */
         float gaze_want_x = 0.0f;
         float gaze_want_y = 0.0f;
         if (fly->mate_quality > 0.05f) gaze_want_x = fly->mate_quality * 0.5f;
@@ -1476,7 +1545,14 @@ static inline void TUpdate(TFLY *fly, float dt) {
             gaze_want_x -= fly->predator_risk * 0.4f;
             gaze_want_y += fly->predator_risk * 0.5f;
         }
-        if (fabsf(gaze_want_x) < 0.05f && fabsf(gaze_want_y) < 0.05f) {
+        /* A decided target outranks the ambient biases but not alarm. Fear of
+         * any kind breaks the gaze lock, not just a predator signal, because a
+         * frightened fly is not staring at her friend. */
+        if (fly->look_lock > 0.05f && face_fear < 0.5f && fly->predator_risk < 0.5f) {
+            float hold = fly->look_lock;
+            gaze_want_x = TClamp(gaze_want_x * (1.0f - hold) + fly->look_x * hold, -1.0f, 1.0f);
+            gaze_want_y = TClamp(gaze_want_y * (1.0f - hold) + fly->look_y * hold, -1.0f, 1.0f);
+        } else if (fabsf(gaze_want_x) < 0.05f && fabsf(gaze_want_y) < 0.05f) {
             gaze_want_x = 0.25f * sinf(fly->age * 0.7f);
             gaze_want_y = 0.15f * sinf(fly->age * 0.43f + 1.0f);
         }
@@ -1523,6 +1599,42 @@ static inline void TUpdate(TFLY *fly, float dt) {
         /* Sweat tracks nerves: stress plus awkwardness. */
         float sweat_rate = (fly->stress * 0.4f + fly->emotion[T_EMO_SHYNESS] * 0.5f) - 0.03f;
         fly->sweat = TClamp(fly->sweat + sweat_rate * dt, 0.0f, 1.0f);
+    }
+
+    /* ---- posture ----
+     * How she carries her body, which the face cannot express on its own. A
+     * frightened character curls in and shrinks; a proud one stands up and
+     * back; a bored or sad one lets the weight drop onto her heels. Mood
+     * reaches the spine, the shoulders and the hips, and the rig binds all
+     * three from these channels. */
+    {
+        float fear = TClamp(fly->emotion[T_EMO_FEAR] + fly->emotion[T_EMO_DREAD], 0.0f, 1.0f);
+        float down = TClamp(fly->emotion[T_EMO_SADNESS] +
+                                fly->emotion[T_EMO_DISAPPOINTMENT] +
+                                fly->emotion[T_EMO_BOREDOM],
+                            0.0f, 1.0f);
+        float up = TClamp(fly->emotion[T_EMO_PRIDE] + fly->emotion[T_EMO_HOPE] +
+                              0.5f * fly->emotion[T_EMO_EXCITEMENT],
+                          0.0f, 1.0f);
+        /* Sleep slumps her regardless of mood, and waking undoes it. */
+        float asleep_slump = fly->asleep ? 0.6f : 0.0f;
+
+        float spine_want = 0.5f * up - 0.8f * fear - 0.4f * down - 0.5f * asleep_slump;
+        fly->spine = TExp(fly->spine, TClamp(spine_want, -1.0f, 1.0f), 0.5f, dt);
+
+        /* Shoulders come up in fear, in cold, and in a shrug. Cold has no
+         * emotion of its own here, so the body temperature gap stands in for
+         * it. */
+        float chill = TClamp(0.5f - fly->temp_body, 0.0f, 1.0f) * 2.0f;
+        float shoulder_want =
+            TClamp(0.9f * fear + 0.4f * chill + 0.3f * fly->emotion[T_EMO_SURPRISE], 0.0f, 1.0f);
+        fly->shoulder = TExp(fly->shoulder, shoulder_want, 0.35f, dt);
+
+        /* Curiosity and excitement tip her forward; fear tips her back. */
+        float lean_want = 0.6f * (fly->emotion[T_EMO_CURIOSITY] +
+                                  0.6f * fly->emotion[T_EMO_EXCITEMENT]) -
+                          0.5f * fear - 0.3f * down;
+        fly->lean = TExp(fly->lean, TClamp(lean_want, -1.0f, 1.0f), 0.4f, dt);
     }
 
     /* ---- gesture envelope ----
@@ -1843,6 +1955,28 @@ static inline void TGestureForce(TFLY *fly, int g) {
     fly->gesture = TClampIdx(g, TFLY_N_GESTURE);
     fly->gesture_phase = 0.0f;
     fly->gesture_strength = 0.0f;
+}
+
+/* Point her eyes at something, without touching where she is going. */
+static inline void TLookAt(TFLY *fly, float x, float y) {
+    if (fly == NULL) return;
+    fly->look_x = TClamp(x, -1.0f, 1.0f);
+    fly->look_y = TClamp(y, -1.0f, 1.0f);
+    /* Naming a target is itself an act of attention, so it takes hold on its
+     * own; look_lock then lets the caller back it off. */
+    fly->look_lock = TMax(fly->look_lock, 0.5f);
+}
+
+/* How firmly she holds that gaze, 0 to let it drift, 1 to lock on. */
+static inline void TLookStrength(TFLY *fly, float strength) {
+    if (fly == NULL) return;
+    fly->look_lock = TClamp(strength, 0.0f, 1.0f);
+}
+
+/* Stop looking at anything in particular. */
+static inline void TLookAway(TFLY *fly) {
+    if (fly == NULL) return;
+    fly->look_lock = 0.0f;
 }
 
 /* Can this fly start an encounter right now? */

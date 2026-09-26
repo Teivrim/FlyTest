@@ -53,6 +53,17 @@ pub struct GaitSnapshot {
     pub mastery: f32,
 }
 
+/// One emotion, as reported to the client.
+#[derive(Debug, Clone, Serialize)]
+pub struct EmotionReading {
+    /// Russian label, for the panel.
+    pub name: String,
+    /// Stable ASCII key, for the rig.
+    pub key: &'static str,
+    /// 0..1.
+    pub value: f32,
+}
+
 /// The face, straight out of the C core. The rig reads this and nothing else.
 #[derive(Debug, Clone, Serialize)]
 pub struct FaceSnapshot {
@@ -70,6 +81,24 @@ pub struct FaceSnapshot {
     pub blush: f32,
     pub tears: f32,
     pub sweat: f32,
+    /// How far she has chosen to open her eyes, 0..1. The lid is shut if this
+    /// or the reflex wants it shut.
+    pub eye_open: f32,
+    /// Pupil adaptation, 0 dark .. 1 bright.
+    pub eye_adapt: f32,
+    /// Seconds since she woke, which the rig uses for the waking sequence.
+    pub wake_timer: f32,
+}
+
+/// How she carries her body, as opposed to how her face looks.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct PostureSnapshot {
+    /// -1 curled in .. 1 stretched up.
+    pub spine: f32,
+    /// 0 down .. 1 shrugged up.
+    pub shoulder: f32,
+    /// -1 leaning back .. 1 leaning forward.
+    pub lean: f32,
 }
 
 /// What a character is doing with her body, and who she is doing it to.
@@ -124,9 +153,16 @@ pub struct AgentSnapshot {
     pub height: f32,
     pub gait: GaitSnapshot,
     /// Every emotion, not just the dominant one, for the affect display.
-    pub affect: Vec<(String, f32)>,
+    ///
+    /// Each entry is a display name, a value, and a stable ASCII key. The key
+    /// is what the rig reads: matching on the Russian label would break the
+    /// moment a name is reworded, and matching on the index would break the
+    /// moment an emotion is inserted.
+    pub affect: Vec<EmotionReading>,
     /// The face, for the rig.
     pub face: FaceSnapshot,
+    /// How she carries her body.
+    pub posture: PostureSnapshot,
     /// Gesture and relationship state.
     pub social: SocialSnapshot,
 }
@@ -182,6 +218,10 @@ const HISTORY_LEN: usize = 240;
 const LOG_LEN: usize = 60;
 /// Minimum sim time between two level-up lines for the same fly.
 const LEVEL_LOG_INTERVAL: f32 = 3.0;
+
+/// Half the distance two comfortable characters will tolerate between them.
+/// Shyness and fear widen it, a bond narrows it.
+const PERSONAL_SPACE: f32 = 0.55;
 #[derive(Debug, Clone, Serialize)]
 pub struct BrainSnapshot {
     pub act: String,
@@ -575,6 +615,45 @@ pub const CANDIDATES: [i32; 6] = [
 pub const GAIT_NAMES: [&str; 4] = ["торопливый", "ровный", "длинный", "петляющий"];
 
 /// Russian label for every emotion, matching `T_EMO_*` order.
+/// Stable ASCII keys, index-for-index with `EMOTION_NAMES` and the `T_EMO_*`
+/// order in the C core.
+///
+/// These exist so the rig can bind to a feeling without matching on a Russian
+/// label. A label is for people and gets reworded; a key is for code and does
+/// not. The order here is load-bearing: it must stay aligned with the header,
+/// which a test below enforces.
+pub const EMOTION_KEYS: [&str; 26] = [
+    "fear",
+    "joy",
+    "sadness",
+    "anger",
+    "disgust",
+    "surprise",
+    "curiosity",
+    "lust",
+    "craving",
+    "contentment",
+    "dread",
+    "confusion",
+    "pride",
+    "gratitude",
+    "relief",
+    "disappointment",
+    "hope",
+    "jealousy",
+    "shyness",
+    "affection",
+    "boredom",
+    "excitement",
+    "compassion",
+    "trust",
+    "longing",
+    // The last slot is T_EMOTION_END rather than a feeling. It is never
+    // written, so it always reads zero, and naming it "reserved" keeps anyone
+    // looking for a twenty-sixth emotion from hunting for one.
+    "reserved",
+];
+
 pub const EMOTION_NAMES: [&str; 26] = [
     "боль",
     "страх",
@@ -1058,6 +1137,97 @@ impl EditorRuntime {
         present_act(&mut brain.fly, act);
     }
 
+    /// Keep characters out of each other's personal space.
+    ///
+    /// Two characters standing inside one another reads as a bug, and it also
+    /// makes the encounter geometry meaningless, because there is no "near" to
+    /// speak of. The push is soft and scales with how far inside the space
+    /// they are, so they ease apart rather than shooting apart. A frightened
+    /// character wants more room than a comfortable one, which is why the
+    /// radius is read from the brain rather than fixed.
+    fn resolve_personal_space(&mut self, dt: f32) {
+        for i in 0..self.agents.len() {
+            for j in (i + 1)..self.agents.len() {
+                let dx = self.agents[j].position[0] - self.agents[i].position[0];
+                let dy = self.agents[j].position[1] - self.agents[i].position[1];
+                let distance = (dx * dx + dy * dy).sqrt();
+                let wanted = self.space_wanted(i) + self.space_wanted(j);
+                if (distance >= wanted) || (distance < 1e-4) {
+                    continue;
+                }
+                // Push each one out along the line between them, and split the
+                // correction so neither is shoved.
+                let push = (wanted - distance) * dt * 2.5;
+                let ux = dx / distance;
+                let uy = dy / distance;
+                self.agents[i].velocity[0] -= ux * push;
+                self.agents[i].velocity[1] -= uy * push;
+                self.agents[j].velocity[0] += ux * push;
+                self.agents[j].velocity[1] += uy * push;
+            }
+        }
+    }
+
+    /// How much room a character wants around her, in world units.
+    fn space_wanted(&self, index: usize) -> f32 {
+        let brain = &self.brains[index];
+        let shy = brain.fly.emotion_level(tfly::emotion::SHYNESS);
+        let fear = brain
+            .fly
+            .emotion_level(tfly::emotion::FEAR)
+            .max(brain.fly.fear_level());
+        let bond = brain.fly.bond();
+        // Shyness and fear open the circle; a bond closes it, because
+        // somebody you know is somebody you will happily stand close to.
+        PERSONAL_SPACE * (1.0 + 0.45 * shy + 0.6 * fear - 0.3 * bond)
+    }
+
+    /// Let each character look at whoever it last met.
+    ///
+    /// The core already turns its gaze toward a mate, but only as a bias with
+    /// no idea where the mate actually is. Pointing the world coupling at the
+    /// partner's real position is what turns that bias into a look at someone
+    /// rather than a glance off to one side.
+    fn aim_gaze_at_partners(&mut self) {
+        for index in 0..self.agents.len() {
+            let Some(partner_id) = self.partners.get(index).copied().flatten() else {
+                continue;
+            };
+            let Some(other) = self.agents.iter().position(|agent| agent.id == partner_id) else {
+                continue;
+            };
+            if other == index {
+                continue;
+            }
+            let (ax, ay) = (
+                self.agents[index].position[0],
+                self.agents[index].position[1],
+            );
+            let (bx, by) = (
+                self.agents[other].position[0],
+                self.agents[other].position[1],
+            );
+            let dx = bx - ax;
+            let dy = by - ay;
+            let distance = (dx * dx + dy * dy).sqrt();
+            // Only worth looking at from close enough to see a face.
+            if !(0.05..4.0).contains(&distance) {
+                continue;
+            }
+            // The coupling is a normalised attractor, so clamp rather than
+            // divide: a partner at arm's length and one across the stage both
+            // mean "over there".
+            let nx = (dx / distance).clamp(-1.0, 1.0) * (distance.min(2.0) / 2.0);
+            let ny = (dy / distance).clamp(-1.0, 1.0) * (distance.min(2.0) / 2.0);
+            self.brains[index].fly.look_at(nx, ny);
+            // Looking at someone is looking away from your own goal, so the
+            // act pull has to give way or she will walk through them.
+            self.brains[index].fly.look_strength(0.6);
+            self.brains[other].fly.look_at(-nx, -ny);
+            self.brains[other].fly.look_strength(0.6);
+        }
+    }
+
     /// Let characters meet when they are near each other and inclined to.
     ///
     /// A pair only meets if they are close, both off cooldown, and at least one
@@ -1263,6 +1433,9 @@ impl EditorRuntime {
                 blush: 0.0,
                 tears: 0.0,
                 sweat: 0.0,
+                eye_open: 1.0,
+                eye_adapt: 1.0,
+                wake_timer: 99.0,
             };
         };
         FaceSnapshot {
@@ -1276,6 +1449,25 @@ impl EditorRuntime {
             blush: brain.fly.blush(),
             tears: brain.fly.tears(),
             sweat: brain.fly.sweat(),
+            eye_open: brain.fly.eye_open(),
+            eye_adapt: brain.fly.eye_adapt(),
+            wake_timer: brain.fly.wake_timer(),
+        }
+    }
+
+    /// Posture, straight from the brain.
+    fn posture_for(&self, id: u32) -> PostureSnapshot {
+        let Some(brain) = self.brain_of(id) else {
+            return PostureSnapshot {
+                spine: 0.0,
+                shoulder: 0.0,
+                lean: 0.0,
+            };
+        };
+        PostureSnapshot {
+            spine: brain.fly.spine(),
+            shoulder: brain.fly.shoulder(),
+            lean: brain.fly.lean(),
         }
     }
 
@@ -1304,27 +1496,34 @@ impl EditorRuntime {
         }
     }
 
-    /// Every emotion for a fly, as Russian-labelled pairs, strongest first.
-    fn affect_for(&self, id: u32) -> Vec<(String, f32)> {
+    /// Every emotion for a fly, strongest first, with a display name and a
+    /// stable key for each.
+    fn affect_for(&self, id: u32) -> Vec<EmotionReading> {
         let Some(brain) = self.brain_of(id) else {
             return Vec::new();
         };
-        let mut pairs: Vec<(String, f32)> = brain
+        let mut pairs: Vec<EmotionReading> = brain
             .fly
             .affect()
             .into_iter()
-            .map(|(emotion_id, _, value)| {
-                (
-                    EMOTION_NAMES
-                        .get(emotion_id as usize)
-                        .copied()
-                        .unwrap_or("?")
-                        .to_owned(),
-                    value,
-                )
+            .map(|(emotion_id, _, value)| EmotionReading {
+                name: EMOTION_NAMES
+                    .get(emotion_id as usize)
+                    .copied()
+                    .unwrap_or("?")
+                    .to_owned(),
+                key: EMOTION_KEYS
+                    .get(emotion_id as usize)
+                    .copied()
+                    .unwrap_or("unknown"),
+                value,
             })
             .collect();
-        pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        pairs.sort_by(|a, b| {
+            b.value
+                .partial_cmp(&a.value)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         pairs
     }
 
@@ -1479,6 +1678,12 @@ impl EditorRuntime {
             self.encounter_timer = 0.0;
             self.run_encounters(dt);
         }
+        // Then look at whoever was just met, and keep out of each other's way.
+        // Both run every frame rather than on the encounter cadence, because
+        // two characters drifting together need easing apart the whole time
+        // they are close, not once every encounter tick.
+        self.aim_gaze_at_partners();
+        self.resolve_personal_space(dt);
     }
 
     pub fn snapshot(&self, fps: f32) -> EditorSnapshot {
@@ -1541,6 +1746,7 @@ impl EditorRuntime {
                     },
                     affect,
                     face: self.face_for(agent.id),
+                    posture: self.posture_for(agent.id),
                     social: self.social_for(agent.id),
                 }
             })
@@ -1895,6 +2101,47 @@ impl EditorRuntime {
                 }
             }
             // Make a character play a pose by hand.
+            // Put a character to sleep, or wake her.
+            //
+            // This exists because the waking sequence is the most interesting
+            // thing the face does and there was no other way to see it: she
+            // only ever fell asleep on her own once her energy ran out, which
+            // took minutes of simulated time.
+            "sleep" => {
+                let id = command.id.context("sleep requires id")?;
+                if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                    if command.value.map(|v| v > 0.5).unwrap_or(true) {
+                        self.brains[index].fly.sleep();
+                    } else {
+                        self.brains[index].fly.wake();
+                    }
+                    self.log(LogEntry {
+                        t: 0.0,
+                        fly: id,
+                        kind: "sleep".to_owned(),
+                        text: if self.brains[index].fly.is_asleep() {
+                            "уснула".to_owned()
+                        } else {
+                            "проснулась".to_owned()
+                        },
+                    });
+                }
+            }
+            // Startle a character, which is the fastest way to watch the eyes
+            // fly open and the waking sequence play out.
+            "startle" => {
+                let id = command.id.context("startle requires id")?;
+                let amount = command.value.unwrap_or(0.95).clamp(0.0, 1.0);
+                if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                    self.brains[index].fly.surprise(amount);
+                    self.log(LogEntry {
+                        t: 0.0,
+                        fly: id,
+                        kind: "startle".to_owned(),
+                        text: "испуг".to_owned(),
+                    });
+                }
+            }
             "gesture" => {
                 let id = command.id.context("gesture requires id")?;
                 let which = command.value.unwrap_or(1.0).clamp(0.0, 7.0) as i32;
@@ -2598,11 +2845,14 @@ mod tests {
             agent
                 .affect
                 .iter()
-                .all(|(name, _)| EMOTION_NAMES.contains(&name.as_str())),
+                .all(|e| EMOTION_NAMES.contains(&e.name.as_str())),
             "every affect label must be a known emotion"
         );
         for pair in agent.affect.windows(2) {
-            assert!(pair[0].1 >= pair[1].1, "affect must be sorted descending");
+            assert!(
+                pair[0].value >= pair[1].value,
+                "affect must be sorted descending"
+            );
         }
         assert_eq!(agent.gait.weights.len(), GAIT_NAMES.len());
         assert!(agent.gait.steps > 0);
@@ -2659,6 +2909,157 @@ mod tests {
         assert!(
             hurt_drive < calm_drive,
             "a frightened fly must want company less: calm={calm_drive} hurt={hurt_drive}"
+        );
+    }
+
+    #[test]
+    fn emotion_keys_stay_aligned_with_their_names() {
+        assert_eq!(
+            EMOTION_KEYS.len(),
+            EMOTION_NAMES.len(),
+            "a key without a name, or the reverse, would silently mislabel a bar"
+        );
+        // Keys have to be unique, or the rig's last-wins lookup would report one
+        // feeling where there are two.
+        let mut seen = std::collections::HashSet::new();
+        for key in EMOTION_KEYS {
+            assert!(!key.is_empty(), "an emotion must have a key");
+            assert!(key.is_ascii(), "a key must stay ASCII: {key}");
+            assert!(seen.insert(key), "duplicate emotion key: {key}");
+        }
+        // The rig binds to these by name, so the ones it reads must be present.
+        for needed in [
+            "sadness",
+            "fear",
+            "joy",
+            "anger",
+            "surprise",
+            "shyness",
+            "pride",
+            "confusion",
+            "excitement",
+            "contentment",
+        ] {
+            assert!(
+                EMOTION_KEYS.contains(&needed),
+                "the rig binds to {needed} and it is not in the key table"
+            );
+        }
+    }
+
+    #[test]
+    fn every_emotion_reports_a_key() {
+        let mut runtime = EditorRuntime::new(1);
+        for _ in 0..200 {
+            runtime.step(FIXED_DT);
+        }
+        let affect = &runtime.snapshot(60.0).agents[0].affect;
+        assert!(!affect.is_empty());
+        for reading in affect {
+            assert!(!reading.key.is_empty(), "an emotion arrived without a key");
+            assert!(
+                !reading.name.is_empty(),
+                "an emotion arrived without a name"
+            );
+            assert!(
+                EMOTION_KEYS.contains(&reading.key),
+                "the rig cannot bind to an unknown key: {}",
+                reading.key
+            );
+        }
+    }
+
+    #[test]
+    fn characters_keep_out_of_each_others_space() {
+        let mut runtime = EditorRuntime::new(2);
+        runtime
+            .apply_command(br#"{"action":"act","name":"main_stage"}"#)
+            .expect("act");
+        // Put them on top of each other and let the resolver work.
+        runtime.agents[1].position[0] = runtime.agents[0].position[0];
+        runtime.agents[1].position[1] = runtime.agents[0].position[1];
+        for _ in 0..300 {
+            runtime.step(FIXED_DT);
+        }
+        let dx = runtime.agents[0].position[0] - runtime.agents[1].position[0];
+        let dy = runtime.agents[0].position[1] - runtime.agents[1].position[1];
+        let distance = (dx * dx + dy * dy).sqrt();
+        assert!(
+            distance > 0.2,
+            "two characters must not end up inside one another, got {distance}"
+        );
+    }
+
+    #[test]
+    fn a_frightened_character_keeps_further_away() {
+        let mut runtime = EditorRuntime::new(2);
+        // Fear is a direct input, so this is the honest way to open the
+        // circle. Shyness is derived from company and tiredness and would take
+        // a minute of simulated time to raise.
+        let calm_room = runtime.space_wanted(0);
+        for _ in 0..60 {
+            runtime.brains[0].fly.fear(0.9);
+            runtime.step(FIXED_DT);
+        }
+        let scared_room = runtime.space_wanted(0);
+        assert!(
+            scared_room > calm_room,
+            "fear opens the circle: {calm_room} -> {scared_room}"
+        );
+    }
+
+    #[test]
+    fn a_bond_narrows_the_circle() {
+        let mut runtime = EditorRuntime::new(2);
+        let before = runtime.space_wanted(0);
+        for _ in 0..5 {
+            {
+                // Split the borrow so both distinct brains can be mutably
+                // borrowed, the same reason run_encounters does it.
+                let (left, right) = runtime.brains.split_at_mut(1);
+                let _ = tfly::meet(&mut left[0].fly, &mut right[0].fly, tfly::encounter::SHARE);
+            }
+            for _ in 0..400 {
+                runtime.brains[0].fly.steps(1, FIXED_DT);
+                runtime.brains[1].fly.steps(1, FIXED_DT);
+            }
+        }
+        let close = runtime.space_wanted(0);
+        assert!(
+            runtime.brains[0].fly.bond() > 0.2,
+            "the bond should have formed, got {}",
+            runtime.brains[0].fly.bond()
+        );
+        assert!(
+            close < before,
+            "somebody you know is somebody you will stand close to: {before} -> {close}"
+        );
+    }
+
+    #[test]
+    fn characters_look_at_whoever_they_met() {
+        let mut runtime = EditorRuntime::new(2);
+        runtime
+            .apply_command(br#"{"action":"act","name":"main_stage"}"#)
+            .expect("act");
+        assert!(
+            runtime
+                .apply_command(br#"{"action":"meet","id":1,"value":2}"#)
+                .is_ok()
+        );
+        for _ in 0..200 {
+            runtime.step(FIXED_DT);
+        }
+        let (x, y, lock) = runtime.brains[0].fly.look();
+        assert!(lock > 0.0, "she holds a gaze on her partner, got {lock}");
+        assert!(
+            x.abs() <= 1.0 && y.abs() <= 1.0,
+            "the target stays in range"
+        );
+        // And the partner looks back.
+        assert!(
+            runtime.brains[1].fly.look().2 > 0.0,
+            "the partner looks back"
         );
     }
 

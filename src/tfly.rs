@@ -87,6 +87,8 @@ unsafe extern "C" {
     fn tfly_joy(handle: *mut TFlyHandle, v: c_float);
     fn tfly_sadness(handle: *mut TFlyHandle, v: c_float);
     fn tfly_anger(handle: *mut TFlyHandle, v: c_float);
+    fn tfly_surprise(handle: *mut TFlyHandle, v: c_float);
+    fn tfly_pride(handle: *mut TFlyHandle, v: c_float);
     fn tfly_curiosity(handle: *mut TFlyHandle, v: c_float);
     fn tfly_contentment(handle: *mut TFlyHandle, v: c_float);
     fn tfly_dread(handle: *mut TFlyHandle, v: c_float);
@@ -174,6 +176,18 @@ unsafe extern "C" {
     fn tfly_blush(handle: *mut TFlyHandle) -> c_float;
     fn tfly_tears(handle: *mut TFlyHandle) -> c_float;
     fn tfly_sweat(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_eye_open(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_eye_adapt(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_wake_timer(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_look_at(handle: *mut TFlyHandle, x: c_float, y: c_float);
+    fn tfly_look_strength(handle: *mut TFlyHandle, s: c_float);
+    fn tfly_look_away(handle: *mut TFlyHandle);
+    fn tfly_look_x(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_look_y(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_look_lock(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_spine(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_shoulder(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_lean(handle: *mut TFlyHandle) -> c_float;
     fn tfly_gesture(handle: *mut TFlyHandle) -> c_int;
     fn tfly_gesture_strength(handle: *mut TFlyHandle) -> c_float;
     fn tfly_gesture_phase(handle: *mut TFlyHandle) -> c_float;
@@ -520,6 +534,18 @@ impl Fly {
     }
     pub fn curiosity(&mut self, v: f32) {
         unsafe { tfly_curiosity(self.ptr(), v) }
+    }
+    /// Startle her.
+    ///
+    /// A surprise above three quarters wakes her, because arousal has to
+    /// reach the sleep state or a startle would only lift the eyelids of
+    /// somebody still asleep.
+    pub fn surprise(&mut self, v: f32) {
+        unsafe { tfly_surprise(self.ptr(), v) }
+    }
+    /// Pride, which is what makes her stand up straight.
+    pub fn pride(&mut self, v: f32) {
+        unsafe { tfly_pride(self.ptr(), v) }
     }
     pub fn contentment(&mut self, v: f32) {
         unsafe { tfly_contentment(self.ptr(), v) }
@@ -1195,6 +1221,71 @@ impl Fly {
         unsafe { tfly_sweat(self.ptr()) }
     }
 
+    /// How far open she has *chosen* to open her eyes, 0..1.
+    ///
+    /// Distinct from [`Fly::blink`], which is a reflex. The lid is shut if
+    /// either channel wants it shut, so the rig reads the union and this
+    /// channel is what tells it whether the closure was a decision.
+    #[must_use]
+    pub fn eye_open(&self) -> f32 {
+        unsafe { tfly_eye_open(self.ptr()) }
+    }
+    /// Pupil adaptation to light, 0 dark .. 1 bright.
+    #[must_use]
+    pub fn eye_adapt(&self) -> f32 {
+        unsafe { tfly_eye_adapt(self.ptr()) }
+    }
+    /// Seconds since she woke. Zero while asleep.
+    #[must_use]
+    pub fn wake_timer(&self) -> f32 {
+        unsafe { tfly_wake_timer(self.ptr()) }
+    }
+
+    /// Point her eyes at something, without touching where she is going.
+    ///
+    /// Naming a target is itself an act of attention, so the gaze takes hold
+    /// on its own. Use [`Fly::look_strength`] to set how firmly.
+    pub fn look_at(&mut self, x: f32, y: f32) {
+        unsafe { tfly_look_at(self.ptr(), x, y) }
+    }
+    /// How firmly she holds that gaze, 0 to let it drift, 1 to lock on.
+    pub fn look_strength(&mut self, strength: f32) {
+        unsafe { tfly_look_strength(self.ptr(), strength) }
+    }
+    /// Stop looking at anything in particular.
+    pub fn look_away(&mut self) {
+        unsafe { tfly_look_away(self.ptr()) }
+    }
+    /// The gaze she is holding, in the model's own coordinates.
+    #[must_use]
+    pub fn look(&self) -> (f32, f32, f32) {
+        unsafe {
+            (
+                tfly_look_x(self.ptr()),
+                tfly_look_y(self.ptr()),
+                tfly_look_lock(self.ptr()),
+            )
+        }
+    }
+
+    // ---- posture -------------------------------------------------------
+
+    /// Spine carriage, -1 curled in .. 1 stretched up.
+    #[must_use]
+    pub fn spine(&self) -> f32 {
+        unsafe { tfly_spine(self.ptr()) }
+    }
+    /// Shoulder height, 0 down .. 1 shrugged up.
+    #[must_use]
+    pub fn shoulder(&self) -> f32 {
+        unsafe { tfly_shoulder(self.ptr()) }
+    }
+    /// Body lean, -1 leaning back .. 1 leaning forward.
+    #[must_use]
+    pub fn lean(&self) -> f32 {
+        unsafe { tfly_lean(self.ptr()) }
+    }
+
     // ---- gesture and social -------------------------------------------
 
     /// The pose currently being held, from the `gesture` module.
@@ -1524,6 +1615,160 @@ mod face_tests {
             a.emotion_level(emotion::JOY),
             joy_a,
             "a refused encounter must not move affect"
+        );
+    }
+    /// Waking is a sequence, not a switch.
+    #[test]
+    fn opening_the_eyes_takes_time() {
+        let mut fly = Fly::new();
+        fly.seed(13);
+        fly.light(0.8);
+        fly.sleep();
+        fly.steps(180, 1.0 / 60.0);
+        assert!(fly.blink() > 0.9, "the lids are shut while asleep");
+        assert!(fly.eye_open() < 0.1, "and deliberately so");
+        fly.wake();
+        fly.steps(1, 1.0 / 60.0);
+        assert!(
+            fly.eye_open() < 0.5,
+            "the lids must not snap open the instant she wakes: {}",
+            fly.eye_open()
+        );
+        fly.steps(200, 1.0 / 60.0);
+        assert!(fly.eye_open() > 0.95, "she opens her eyes on purpose");
+        assert!(fly.blink() < 0.1, "and ends up looking at the world");
+    }
+
+    /// Waking is not monotonic: she blinks the sleep out on the way up. This
+    /// is what stops it reading as a switch being thrown.
+    #[test]
+    fn waking_blinks_the_sleep_out() {
+        let mut fly = Fly::new();
+        fly.seed(13);
+        fly.sleep();
+        fly.steps(120, 1.0 / 60.0);
+        fly.wake();
+        let mut lowest = 1.0f32;
+        let mut reopened = 0;
+        let mut was_shut = true;
+        for _ in 0..84 {
+            fly.steps(1, 1.0 / 60.0);
+            lowest = lowest.min(fly.blink());
+            let shut = fly.blink() > 0.2;
+            if !shut && was_shut {
+                reopened += 1;
+            }
+            was_shut = shut;
+        }
+        assert!(lowest < 0.4, "the lids come most of the way up: {lowest}");
+        assert!(
+            reopened >= 1,
+            "she blinks the sleep out on the way, so waking is not a switch"
+        );
+    }
+
+    /// A startle has to wake her, not merely lift her lids. Otherwise the eyes
+    /// fly open and then close again as the surprise decays.
+    #[test]
+    fn a_startle_wakes_her() {
+        let mut fly = Fly::new();
+        fly.seed(17);
+        fly.sleep();
+        fly.steps(120, 1.0 / 60.0);
+        assert!(fly.is_asleep());
+        fly.surprise(0.95);
+        fly.steps(1, 1.0 / 60.0);
+        assert!(!fly.is_asleep(), "a startle must wake her");
+        let mut flew = 1.0f32;
+        for _ in 0..30 {
+            fly.steps(1, 1.0 / 60.0);
+            flew = flew.min(fly.blink());
+        }
+        assert!(flew < 0.2, "her eyes fly open at a startle: {flew}");
+        fly.steps(120, 1.0 / 60.0);
+        assert!(
+            !fly.is_asleep(),
+            "and she does not fall back asleep at once"
+        );
+    }
+
+    /// The body has to carry the mood too, because a face alone cannot say
+    /// whether someone is braced or comfortable.
+    #[test]
+    fn posture_follows_mood() {
+        let mut calm = Fly::new();
+        let mut afraid = Fly::new();
+        let mut proud = Fly::new();
+        calm.seed(23);
+        afraid.seed(23);
+        proud.seed(23);
+        for i in 0..600 {
+            if i % 20 == 0 {
+                afraid.fear(0.9);
+                proud.pride(0.6);
+            }
+            calm.steps(1, 1.0 / 60.0);
+            afraid.steps(1, 1.0 / 60.0);
+            proud.steps(1, 1.0 / 60.0);
+        }
+        assert!(afraid.spine() < calm.spine(), "fear curls her in");
+        assert!(
+            afraid.shoulder() > calm.shoulder(),
+            "fear lifts her shoulders"
+        );
+        assert!(afraid.lean() < calm.lean(), "fear tips her back");
+        assert!(proud.spine() > calm.spine(), "pride straightens her up");
+    }
+
+    /// Naming a target has to steer the gaze without touching the motor
+    /// attractor, because a character walks somewhere while watching somebody
+    /// else do the walking.
+    #[test]
+    fn a_decided_gaze_beats_the_drift() {
+        let mut fly = Fly::new();
+        fly.seed(29);
+        for _ in 0..120 {
+            fly.steps(1, 1.0 / 60.0);
+        }
+        let drift = fly.gaze_x();
+        fly.look_at(-0.8, 0.2);
+        fly.look_strength(1.0);
+        for _ in 0..120 {
+            fly.steps(1, 1.0 / 60.0);
+        }
+        assert!(
+            fly.gaze_x() < drift - 0.2,
+            "she must look where she decided: drift {drift} -> {}",
+            fly.gaze_x()
+        );
+        assert!(fly.look().2 > 0.9, "the lock is reported");
+        fly.look_away();
+        for _ in 0..240 {
+            fly.steps(1, 1.0 / 60.0);
+        }
+        assert!(fly.look().2 == 0.0, "look_away releases the lock");
+    }
+
+    /// A threat outranks a decided gaze, because a fly watches the predator
+    /// rather than her friend.
+    #[test]
+    fn a_threat_overrides_a_decided_gaze() {
+        let mut fly = Fly::new();
+        fly.seed(31);
+        fly.look_at(0.8, 0.0);
+        fly.look_strength(1.0);
+        for _ in 0..120 {
+            fly.steps(1, 1.0 / 60.0);
+        }
+        let watching_friend = fly.gaze_x();
+        for _ in 0..20 {
+            fly.fear(0.9);
+            fly.steps(1, 1.0 / 60.0);
+        }
+        assert!(
+            fly.gaze_x() < watching_friend,
+            "a threat must pull the gaze away: {watching_friend} -> {}",
+            fly.gaze_x()
         );
     }
 }

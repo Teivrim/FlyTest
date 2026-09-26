@@ -509,6 +509,13 @@ function createFlyVisual(agent) {
   const rig = new THREE.Group();
   group.add(rig);
 
+  // The torso is its own group so the spine can bend without dragging the
+  // head and arms along with it. Without this there is nowhere to put a
+  // posture channel, and a frightened character can only hunch her shoulders
+  // in her face.
+  const torso = new THREE.Group();
+  rig.add(torso);
+
   // ---- torso: a tapered dress, wider at the hem ----
   const body = new THREE.Mesh(
     new THREE.CylinderGeometry(0.10, 0.19, 0.34, 16),
@@ -516,17 +523,22 @@ function createFlyVisual(agent) {
   );
   body.position.y = 0.17;
   body.castShadow = true;
-  rig.add(body);
+  torso.add(body);
 
   const collar = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.02, 6, 14), material('#fff4f8'));
   collar.rotation.x = Math.PI / 2;
   collar.position.y = 0.35;
-  rig.add(collar);
+  torso.add(collar);
 
   // ---- head ----
+  // The neck is a separate pivot so the head can turn and tilt while the
+  // spine stays put. One rigid group for both would make every eye movement
+  // look like a whole-body flinch.
+  const neck = new THREE.Group();
+  neck.position.y = 0.40;
+  torso.add(neck);
   const head = new THREE.Group();
-  head.position.y = 0.40;
-  rig.add(head);
+  neck.add(head);
   const face = new THREE.Mesh(new THREE.SphereGeometry(0.115, 20, 16), material(SKIN, '#ffd7c2', 0.05));
   face.scale.set(1.0, 0.95, 0.92);
   face.castShadow = true;
@@ -556,7 +568,7 @@ function createFlyVisual(agent) {
     lid.rotation.x = -1.35;
     lid.position.z = 0.006;
     g.add(lid);
-    return { group: g, iris, shine, lid };
+    return { group: g, white, iris, shine, lid };
   }
   const eyeL = makeEye(-1);
   const eyeR = makeEye(1);
@@ -614,15 +626,20 @@ function createFlyVisual(agent) {
   fringe.position.set(0, 0.062, 0.098);
   fringe.rotation.x = 0.18;
   head.add(fringe);
+  // The trailing hair hangs off its own pivot so it can lag behind the head.
+  // Hair that is welded to the skull looks painted on the moment the head
+  // moves, and nothing else in the rig sells motion as cheaply.
+  const hairSwing = new THREE.Group();
+  head.add(hairSwing);
   const lockGeometry = new THREE.CapsuleGeometry(0.028, 0.14, 4, 8);
   const lockL = new THREE.Mesh(lockGeometry, hairMaterial);
-  lockL.position.set(-0.105, -0.035, 0.02); lockL.rotation.z = 0.2; head.add(lockL);
+  lockL.position.set(-0.105, -0.035, 0.02); lockL.rotation.z = 0.2; hairSwing.add(lockL);
   const lockR = new THREE.Mesh(lockGeometry, hairMaterial);
-  lockR.position.set(0.105, -0.035, 0.02); lockR.rotation.z = -0.2; head.add(lockR);
+  lockR.position.set(0.105, -0.035, 0.02); lockR.rotation.z = -0.2; hairSwing.add(lockR);
   // Twin tails are the strongest silhouette cue at this scale.
   const tail = new THREE.Mesh(new THREE.CapsuleGeometry(0.032, 0.17, 4, 8), hairMaterial);
-  tail.position.set(-0.125, 0.045, -0.06); tail.rotation.set(0.5, 0, 0.55); head.add(tail);
-  const tailR = tail.clone(); tailR.position.x = 0.125; tailR.rotation.z = -0.55; head.add(tailR);
+  tail.position.set(-0.125, 0.045, -0.06); tail.rotation.set(0.5, 0, 0.55); hairSwing.add(tail);
+  const tailR = tail.clone(); tailR.position.x = 0.125; tailR.rotation.z = -0.55; hairSwing.add(tailR);
 
   // ---- antennae, the fly inheritance ----
   const antennaMaterial = new THREE.MeshBasicMaterial({ color: '#3a2b46' });
@@ -644,18 +661,35 @@ function createFlyVisual(agent) {
   const leftWing = new THREE.Mesh(new THREE.PlaneGeometry(0.22, 0.13), wingMaterial);
   leftWing.position.set(-0.12, 0.27, -0.10);
   leftWing.rotation.set(0.2, 0.5, 1.15);
-  rig.add(leftWing);
+  torso.add(leftWing);
   const rightWing = leftWing.clone();
   rightWing.position.x = 0.12;
   rightWing.rotation.set(0.2, -0.5, -1.15);
-  rig.add(rightWing);
+  torso.add(rightWing);
 
   // ---- arms ----
+  // Each arm hangs from a shoulder pivot rather than spinning about its own
+  // middle. The difference is the whole range of the gesture: pivoting at the
+  // shoulder can raise an arm above the head, and pivoting at the middle can
+  // only wobble it.
   const armGeometry = new THREE.CapsuleGeometry(0.022, 0.11, 4, 8);
-  const armL = new THREE.Mesh(armGeometry, material(SKIN));
-  armL.position.set(-0.105, 0.20, 0.01); armL.rotation.z = 0.22; rig.add(armL);
-  const armR = new THREE.Mesh(armGeometry, material(SKIN));
-  armR.position.set(0.105, 0.20, 0.01); armR.rotation.z = -0.22; rig.add(armR);
+  function makeArm(sign) {
+    const pivot = new THREE.Group();
+    pivot.position.set(sign * 0.105, 0.20, 0.01);
+    pivot.rotation.z = -sign * 0.22;
+    const arm = new THREE.Mesh(armGeometry, material(SKIN));
+    // Hang below the pivot, so a rotation swings the arm from the shoulder.
+    arm.position.y = -0.075;
+    pivot.add(arm);
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.026, 8, 6), material(SKIN));
+    hand.position.y = -0.155;
+    pivot.add(hand);
+    return pivot;
+  }
+  const armL = makeArm(-1);
+  const armR = makeArm(1);
+  torso.add(armL);
+  torso.add(armR);
 
   // ---- legs: the part being learned ----
   const legGeometry = new THREE.CapsuleGeometry(0.028, 0.13, 4, 8);
@@ -700,10 +734,13 @@ function createFlyVisual(agent) {
 
   group.userData = {
     agentId: agent.id, body, head, face, hair, outfit, rig,
+    torso, neck, hairSwing,
     leftWing, rightWing, armL, armR, legL, legR,
     selection, label, puffGroup,
     eyes: [eyeL, eyeR], brows: [browL, browR], mouth: mouthMesh, lip,
     blushes: [blushL, blushR], tears: [tearL, tearR], sweatDrop,
+    // Spring state for the trailing hair, so it can lag instead of snapping.
+    hairVelX: 0, hairVelZ: 0,
   };
   scene.add(group);
   return group;
@@ -741,28 +778,99 @@ function syncScene() {
     const bob = walking ? Math.abs(Math.sin(phase)) * 0.035 * stride : 0;
     const crouch = (1 - balance) * 0.06;
     ud.rig.position.y = (agent.height || 0) + bob - crouch;
+
+    /* ---- layered pose ----
+     * Every layer below only ever *adds* to this accumulator. Nothing writes
+     * a joint directly, because a direct write silently cancels the layer
+     * underneath it: an arm set absolutely for a wave stops counter-swinging
+     * with the walk, so the character appears to freeze mid-stride whenever
+     * she gestures. Adding instead means she can walk and wave at once. */
+    const pose = newPose();
+    const now = performance.now() * 0.001 + index;
+
+    // Layer 1: the walk, which everything else is expressed against.
+    poseLegs(pose, walking ? Math.sin(phase) * 0.55 * stride : 0);
+    poseArms(pose, walking ? Math.sin(phase) * 0.35 * stride * (0.5 + 0.5 * agent.energy) : 0);
     // A little torso roll, growing with sway: an unstable walk looks unstable.
-    ud.rig.rotation.z = Math.sin(phase) * 0.05 * sway;
+    pose.spineZ += Math.sin(phase) * 0.05 * sway;
+    // The hip drops on the swing leg, which is most of what sells a walk.
+    pose.hipRoll = Math.sin(phase) * 0.04 * sway;
+    // An idle head turn, so a character standing still is not a mannequin.
+    // The two rates are deliberately incommensurate: a single sine would read
+    // as a metronome.
+    pose.headY += Math.sin(now * 0.29) * 0.13 + Math.sin(now * 0.11) * 0.06;
+    // The head goes down as the eyes close, and comes back up as they open.
+    // Without this the lids move and nothing else does, and a character
+    // falling asleep on her feet looks like a bug rather than like sleep.
+    {
+      const faceNow = agent.face || {};
+      const shut = 1 - Math.max(0, Math.min(1, faceNow.eye_open ?? 1));
+      const waking = Math.max(0, 1 - (faceNow.wake_timer ?? 99) / 1.4);
+      // While waking she is still raising her chin, so the droop has to let go
+      // faster than it arrives.
+      const droop = shut * (1 - waking);
+      pose.neckX += droop * 0.30;
+      pose.headX += droop * 0.16;
+      pose.headZ += droop * 0.05;
+    }
 
-    // Legs swing in opposition, amplitude set by the learned stride.
-    const swing = walking ? Math.sin(phase) * 0.55 * stride : 0;
-    ud.legL.rotation.x = swing;
-    ud.legR.rotation.x = -swing;
-    ud.legL.rotation.z = Math.max(0, swing) * 0.25;
-    ud.legR.rotation.z = Math.max(0, -swing) * 0.25;
+    // Layer 2: posture, from how she is carrying herself.
+    posePosture(pose, agent.posture || {});
 
-    // Arms counter-swing, damped when the character is worn out.
-    const armSwing = walking ? Math.sin(phase) * 0.35 * stride * (0.5 + 0.5 * agent.energy) : 0.05;
-    ud.armL.rotation.x = -armSwing;
-    ud.armR.rotation.x = armSwing;
+    // Layer 3: the gesture, as an offset on top of the walk.
+    poseGesture(pose, agent.social || {});
+
+    // Layer 4: the expression, mostly in the face but with a little in the
+    // spine, because a smile that does not reach the shoulders reads as a
+    // mask rather than a face.
+    poseExpression(pose, agent.affect || [], agent.face || {}, now);
+
+    // Now, and only now, the accumulator reaches the rig.
+    ud.legL.rotation.x = pose.legLx;
+    ud.legR.rotation.x = pose.legRx;
+    ud.legL.rotation.z = pose.legLz;
+    ud.legR.rotation.z = pose.legRz;
+    ud.armL.rotation.x = pose.armLx;
+    ud.armR.rotation.x = pose.armRx;
+    ud.armL.rotation.z = pose.armLz;
+    ud.armR.rotation.z = pose.armRz;
+    ud.torso.rotation.x = pose.spineX;
+    ud.torso.rotation.z = pose.spineZ;
+    ud.torso.rotation.y = pose.spineY;
+    ud.rig.rotation.x = pose.lean;
+    ud.rig.rotation.z += pose.hipRoll;
+    ud.neck.rotation.x = pose.neckX;
+    ud.neck.rotation.y = pose.neckY;
+    ud.neck.rotation.z = pose.neckZ;
+    // Shoulders ride up and in when she is braced, and out when she is open.
+    const lift = pose.shoulder * 0.012;
+    ud.armL.position.y = 0.20 + lift;
+    ud.armR.position.y = 0.20 + lift;
+    ud.armL.rotation.z += pose.shoulder * 0.18;
+    ud.armR.rotation.z -= pose.shoulder * 0.18;
 
     // The wings stay folded. They are vestigial: these flies cannot fly, and
-    // all they get is a small idle flutter.
-    const flutter = Math.sin(performance.now() * 0.003 + index) * 0.05;
+    // all they get is a small idle flutter that picks up with excitement.
+    const flutter = Math.sin(performance.now() * 0.003 + index) * 0.05 * (1 + pose.excite);
     ud.leftWing.rotation.x = 0.2 + flutter;
     ud.rightWing.rotation.x = 0.2 - flutter;
 
-    ud.head.rotation.y = Math.sin(performance.now() * 0.0009 + index) * 0.18;
+    ud.head.rotation.y = pose.headY;
+    ud.head.rotation.z = pose.headZ;
+    ud.head.rotation.x = pose.headX;
+
+    // Layer 5: the hair lags. A spring rather than a copy, so it overshoots
+    // slightly and settles, which is what hair actually does.
+    {
+      const dt = 1 / 60;
+      const k = 42.0, damp = 7.0;
+      const prevX = ud.hairSwing.rotation.x;
+      const prevZ = ud.hairSwing.rotation.z;
+      ud.hairVelX += (-(prevX - pose.headX) * k - ud.hairVelX * damp) * dt;
+      ud.hairVelZ += (-(prevZ - pose.headZ) * k - ud.hairVelZ * damp) * dt;
+      ud.hairSwing.rotation.x = prevX + ud.hairVelX * dt + pose.spineX * 0.4;
+      ud.hairSwing.rotation.z = prevZ + ud.hairVelZ * dt;
+    }
 
     // ---- face ----
     // Every channel below comes straight from the model. The rig does not
@@ -775,6 +883,12 @@ function syncScene() {
     const brow = Math.max(-1, Math.min(1, face.brow ?? 0));
     const smile = Math.max(-1, Math.min(1, face.mouth ?? 0));
     const open = Math.max(0, Math.min(1, face.mouth_open ?? 0));
+    // The voluntary channel, kept separate from the reflex. The rig only needs
+    // the union, which the model has already folded into `blink`; what it uses
+    // the voluntary channel for is the squint shape, because an eye narrowed
+    // against the light is not the same shape as one being blinked.
+    const adapt = Math.max(0, Math.min(1, face.eye_adapt ?? 1));
+    const waking = Math.max(0, 1 - (face.wake_timer ?? 99) / 1.4);
 
     // Lids rotate down over the eye. Closed is a full -90 degrees from the
     // raised position.
@@ -788,6 +902,9 @@ function syncScene() {
       eye.shine.position.x = gazeX * range - 0.008 * Math.sign(eye.iris.position.x || 1);
       eye.shine.position.y = gazeY * range + 0.010;
       eye.shine.visible = blink < 0.7 && pupil > 0.7;
+      // Squinting narrows the eye without closing it.
+      const squint = (1 - adapt) * 0.10 + waking * 0.06;
+      eye.white.scale.y = 0.9 * (1 - squint * (1 - blink));
     }
     // Brows: raised when the model says so, drawn together when frowning.
     for (const br of ud.brows) {
@@ -818,17 +935,22 @@ function syncScene() {
     ud.sweatDrop.position.y = 0.040 - nervous * 0.012;
 
     // Head tilts with the mood: a raised brow tips the head, a frown drops it.
-    ud.head.rotation.z = -brow * 0.10 + smile * 0.05;
-    ud.head.rotation.x = -open * 0.06;
-
-    // ---- gesture ----
-    applyGesture(ud, agent.social || {}, performance.now() * 0.001);
+    // The head is already driven by the pose layers above, so the expression
+    // only leans on the neck here. Writing head.rotation here as well would
+    // fight the spine and neck, and the character would end up looking
+    // somewhere between the two.
 
     ud.selection.visible = agent.selected;
     ud.body.material.emissiveIntensity = 0.16 + agent.hormone_level * 1.2;
     // Affect tints the outfit: joy warms it, fear cools it.
-    const mood = (agent.affect && agent.affect.joy) || 0;
-    const dread = (agent.affect && agent.affect.fear) || 0;
+    //
+    // This reads the same reduced mood the body pose uses, rather than poking
+    // at the affect array as if it were an object. It used to do the latter,
+    // and since the array is a list of readings, `.joy` was always undefined
+    // and the dress never changed colour at all.
+    const tint = affectMood(agent.affect);
+    const mood = tint.joy;
+    const dread = tint.fear;
     ud.body.material.emissive.setRGB(
       0.35 + mood * 0.4,
       0.20 + mood * 0.2 - dread * 0.1,
@@ -932,80 +1054,233 @@ function renderBrain(data) {
   if (agent) renderGaitAndAffect(agent);
 }
 
-// ---- gestures --------------------------------------------------------
+// ---- pose layers --------------------------------------------------------
 /*
- * Pose the body from the model's gesture channel. Every pose is a blend from
- * the rest stance, multiplied by the envelope, so a gesture can fade or be
- * interrupted without leaving the character in a broken pose.
+ * A character is doing four things at once: walking, holding herself some way,
+ * making a gesture, and wearing an expression. Each of those is a layer that
+ * adds to one accumulator, and the accumulator is written to the rig once.
+ *
+ * The alternative, writing joints directly per system, looks fine until two
+ * systems touch the same joint: the second one silently erases the first. That
+ * is how a character ends up waving with both arms glued to her sides whenever
+ * she happens to be walking.
  */
+function newPose() {
+  return {
+    // Legs.
+    legLx: 0, legRx: 0, legLz: 0, legRz: 0,
+    // Arms, as shoulder-pivot rotations.
+    armLx: 0, armRx: 0, armLz: 0, armRz: 0,
+    // Spine and torso.
+    spineX: 0, spineY: 0, spineZ: 0,
+    // Hips and lean, on the root.
+    hipRoll: 0, lean: 0,
+    // Neck, then head on top of it.
+    neckX: 0, neckY: 0, neckZ: 0,
+    headX: 0, headY: 0, headZ: 0,
+    // 0 down .. 1 shrugged.
+    shoulder: 0,
+    // Carried out to the expression layer.
+    excite: 0,
+  };
+}
+
+function poseLegs(pose, swing) {
+  pose.legLx = swing;
+  pose.legRx = -swing;
+  // The knee only bends one way, so only the forward part of the cycle lifts
+  // the leg out to the side.
+  pose.legLz = Math.max(0, swing) * 0.25;
+  pose.legRz = Math.max(0, -swing) * 0.25;
+}
+
+function poseArms(pose, swing) {
+  // Arms counter-swing against the legs. At rest they hang, not stick out.
+  pose.armLx = -swing;
+  pose.armRx = swing;
+  pose.armLz = 0;
+  pose.armRz = 0;
+}
+
+/*
+ * Posture: how she carries her body. The spine curls in under fear, straightens
+ * under pride, and the shoulders come up when she is braced. This is the layer
+ * that makes a mood readable from across the tent, where a face is too small.
+ */
+function posePosture(pose, posture) {
+  const spine = clampf(posture.spine ?? 0, -1, 1);
+  const shoulder = clampf(posture.shoulder ?? 0, 0, 1);
+  const lean = clampf(posture.lean ?? 0, -1, 1);
+
+  // Curling in is a bend forward, not a shrink.
+  pose.spineX += -spine * 0.18;
+  // Straightening up also pushes the chest out a little.
+  pose.spineX += Math.max(0, spine) * 0.06;
+  pose.shoulder += shoulder;
+  // Fear tips her back; curiosity tips her forward.
+  pose.lean += -lean * 0.10;
+  // A hunched character also tucks her head in, which is why the neck reads
+  // separately from the spine.
+  pose.neckX += -spine * 0.10;
+  pose.neckZ += spine * 0.04;
+}
+
+// Gesture ids, matching T_GES_* in TFLY.h.
 const GESTURE_IDS = {
   'приветствие': 1, 'поклон': 2, 'хлопки': 3, 'указание': 4,
   'утешение': 5, 'плечики': 6, 'прошу обнять': 7, 'покой': 0,
 };
 
-function applyGesture(ud, social) {
+/*
+ * A gesture is an offset on the arms and spine, not a replacement pose, so it
+ * composes with the walk instead of cancelling it.
+ */
+function poseGesture(pose, social) {
   const id = GESTURE_IDS[social.gesture];
-  const s = Math.max(0, Math.min(1, social.strength || 0));
-  if (id === undefined || id === 0 || s <= 0.01) {
-    // At rest, ease the arms back to a neutral hang.
-    ud.armL.rotation.x += (0.05 - ud.armL.rotation.x) * 0.2;
-    ud.armR.rotation.x += (0.05 - ud.armR.rotation.x) * 0.2;
-    ud.armL.rotation.z += (0.22 - ud.armL.rotation.z) * 0.2;
-    ud.armR.rotation.z += (-0.22 - ud.armR.rotation.z) * 0.2;
-    ud.rig.rotation.x += (0 - ud.rig.rotation.x) * 0.2;
-    return;
-  }
+  const s = clampf(social.strength || 0, 0, 1);
+  if (id === undefined || id === 0 || s <= 0.01) return;
   // The phase gives repeatable motion inside the gesture, so a wave moves
   // rather than merely appearing.
   const p = social.phase || 0;
   const swing = Math.sin(p * Math.PI * 4);
 
   switch (id) {
-    case 1: // wave: one arm raised, oscillating
-      ud.armR.rotation.x = -2.0 * s;
-      ud.armR.rotation.z = -0.22 - 0.3 * swing * s;
-      ud.armL.rotation.x = 0.05;
+    case 1: // wave: one arm raised above the head and oscillating
+      pose.armRx += -2.0 * s;
+      pose.armRz += 0.3 * swing * s;
+      pose.neckZ += -0.05 * s;
       break;
     case 2: // bow: the whole upper body dips forward
-      ud.rig.rotation.x = 0.6 * s;
-      ud.armL.rotation.x = -0.3 * s;
-      ud.armR.rotation.x = -0.3 * s;
+      pose.spineX += 0.55 * s;
+      pose.neckX += 0.18 * s;
+      pose.armLx += -0.3 * s;
+      pose.armRx += -0.3 * s;
+      pose.armLz += 0.15 * s;
+      pose.armRz += -0.15 * s;
       break;
     case 3: { // clap: hands meet in front, twice per gesture
       const clap = Math.abs(Math.sin(p * Math.PI * 4));
-      ud.armL.rotation.x = -1.3 * s;
-      ud.armR.rotation.x = -1.3 * s;
-      ud.armL.rotation.z = 0.22 + 0.7 * (1 - clap) * s;
-      ud.armR.rotation.z = -0.22 - 0.7 * (1 - clap) * s;
+      pose.armLx += -1.2 * s;
+      pose.armRx += -1.2 * s;
+      // The hands come together and part again, so the gap varies.
+      pose.armLz += 0.7 * (1 - clap) * s;
+      pose.armRz += -0.7 * (1 - clap) * s;
+      pose.spineX += 0.05 * s;
       break;
     }
     case 4: // point: one arm forward, firm
-      ud.armR.rotation.x = -1.5 * s;
-      ud.armR.rotation.z = -0.1;
-      ud.rig.rotation.y = 0.1 * s;
+      pose.armRx += -1.4 * s;
+      pose.spineY += 0.12 * s;
+      pose.neckY += 0.10 * s;
       break;
-    case 5: // comfort: hands to the chest
-      ud.armL.rotation.x = -1.1 * s;
-      ud.armR.rotation.x = -1.1 * s;
-      ud.armL.rotation.z = 0.22 + 0.5 * s;
-      ud.armR.rotation.z = -0.22 - 0.5 * s;
+    case 5: // comfort: hands drawn to the chest
+      pose.armLx += -1.0 * s;
+      pose.armRx += -1.0 * s;
+      pose.armLz += 0.5 * s;
+      pose.armRz += -0.5 * s;
+      pose.spineX += 0.10 * s;
+      pose.neckX += 0.08 * s;
       break;
-    case 6: // shrug: arms out, body slightly lifted
-      ud.armL.rotation.z = 0.22 + 0.6 * s;
-      ud.armR.rotation.z = -0.22 - 0.6 * s;
-      ud.armL.rotation.x = -0.2 * s;
-      ud.armR.rotation.x = -0.2 * s;
-      ud.rig.position.y += 0.02 * s;
+    case 6: // shrug: arms out, palms up, shoulders up
+      pose.shoulder += 0.8 * s;
+      pose.armLz += 0.6 * s;
+      pose.armRz += -0.6 * s;
+      pose.armLx += -0.2 * s;
+      pose.armRx += -0.2 * s;
+      pose.neckX += 0.10 * s;
       break;
     case 7: // asking to be held: both arms reach forward and up
-      ud.armL.rotation.x = -1.7 * s;
-      ud.armR.rotation.x = -1.7 * s;
-      ud.armL.rotation.z = 0.22 + 0.15 * s;
-      ud.armR.rotation.z = -0.22 - 0.15 * s;
+      pose.armLx += -1.6 * s;
+      pose.armRx += -1.6 * s;
+      pose.armLz += 0.15 * s;
+      pose.armRz += -0.15 * s;
+      pose.spineX += -0.08 * s;
+      pose.neckX += -0.10 * s;
       break;
     default:
       break;
   }
+}
+
+/*
+ * The expression layer. Most of the face is driven directly from the model
+ * channels further down; what belongs here is the part of a feeling that lives
+ * in the body rather than the features. A smile that does not reach the
+ * shoulders, or a head that does not tilt into a question, reads as a mask.
+ */
+function poseExpression(pose, affect, face, now) {
+  const mood = affectMood(affect);
+
+  // Excitement straightens her up and gets her moving.
+  pose.excite = mood.excitement;
+  pose.spineX += mood.excitement * 0.06;
+  pose.neckX += -mood.excitement * 0.05;
+
+  // A question goes into the head: she tips it and holds it there, and the
+  // tip is asymmetric because a real head tilt is.
+  if (mood.confusion > 0.25) {
+    const tip = (mood.confusion - 0.25) * 0.5;
+    pose.headZ += 0.16 * tip;
+    pose.headX += 0.06 * tip;
+  }
+  // Embarrassment makes her shrink and look away.
+  if (mood.shyness > 0.2) {
+    const shy = (mood.shyness - 0.2) * 0.6;
+    pose.spineX += 0.10 * shy;
+    pose.neckX += 0.08 * shy;
+    pose.headY += -0.12 * shy * Math.sign(face.gaze_x || 1 || 1);
+  }
+  // Sadness drops the shoulders and the chin.
+  if (mood.sadness > 0.3) {
+    const sad = (mood.sadness - 0.3) * 0.5;
+    pose.shoulder += sad * 0.5;
+    pose.neckX += sad * 0.20;
+    pose.armLz += sad * 0.10;
+    pose.armRz += -sad * 0.10;
+  }
+  // Pride pushes the chin up and the shoulders back.
+  if (mood.pride > 0.3) {
+    const proud = (mood.pride - 0.3) * 0.6;
+    pose.neckX += -proud * 0.16;
+    pose.lean += -proud * 0.06;
+  }
+  // Contentment sways rather than doing anything.
+  if (mood.contentment > 0.4) {
+    pose.hipRoll += Math.sin(now * 0.6) * 0.02 * mood.contentment;
+  }
+}
+
+/*
+ * Reduce the full 26-emotion vector to the handful the body needs, so the
+ * expression layer does not have to re-derive it every frame. Emotions with
+ * the same name as a field collapse; the rest are the ones named here.
+ */
+const MOOD_FIELDS = [
+  'excitement', 'confusion', 'shyness', 'sadness', 'pride', 'contentment',
+  'joy', 'fear', 'anger', 'surprise', 'hope', 'affection', 'boredom',
+];
+/*
+ * Reduce the full 26-emotion vector to the handful the body needs. Entries are
+ * read by their stable `key`, never by the Russian label: a label is for people
+ * and gets reworded, and a reworded label would silently stop moving the rig.
+ * There is no cache here either, because the snapshot hands over a fresh array
+ * every frame and a memo keyed on it could never hit.
+ */
+function affectMood(affect) {
+  const mood = {};
+  for (const field of MOOD_FIELDS) mood[field] = 0;
+  if (!Array.isArray(affect)) return mood;
+  for (const reading of affect) {
+    if (!reading) continue;
+    const key = reading.key;
+    const value = reading.value;
+    if (key in mood && value > mood[key]) mood[key] = value;
+  }
+  return mood;
+}
+
+function clampf(v, lo, hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
 }
 
 // ---- gait and affect -------------------------------------------------
@@ -1028,9 +1303,9 @@ function renderGaitAndAffect(agent) {
 
   // Every emotion, not just the strongest, so a character reads as a mix.
   const affect = agent.affect || [];
-  $('affect-count').textContent = `${affect.filter(([, v]) => v > 0.01).length} активных`;
-  $('affect-list').innerHTML = affect.map(([name, value]) =>
-    `<span class="affect-row">${escapeHtml(name)}<i style="width:${pct(value)}"></i><b>${Math.round(value * 100)}</b></span>`
+  $('affect-count').textContent = `${affect.filter((e) => e.value > 0.01).length} активных`;
+  $('affect-list').innerHTML = affect.map((e) =>
+    `<span class="affect-row">${escapeHtml(e.name)}<i style="width:${pct(e.value)}"></i><b>${Math.round(e.value * 100)}</b></span>`
   ).join('');
 
   // Face gauges, straight from the model.
@@ -1051,6 +1326,36 @@ function renderGaitAndAffect(agent) {
   $('social-partner').textContent = social.partner ? `с #${social.partner}` : 'одинока';
   $('social-bond-meter').style.width = pct(social.bond);
   $('social-last').textContent = social.last_encounter || '—';
+
+  // Posture. The spine and the lean are signed, so their meters grow out from
+  // the centre; a plain left-anchored bar would read "curled in" and
+  // "stretched up" as the same number.
+  const posture = agent.posture || {};
+  setSignedMeter($('posture-spine-meter'), posture.spine ?? 0);
+  setSignedMeter($('posture-lean-meter'), posture.lean ?? 0);
+  $('posture-shoulder-meter').style.width = pct(posture.shoulder ?? 0);
+
+  // Eyes. The voluntary channel and the reflex are reported apart, because
+  // "the lids are down" and "she closed them on purpose" are different facts.
+  const eyeOpen = clampf(face.eye_open ?? 1, 0, 1);
+  const woke = face.wake_timer ?? 99;
+  $('face-eyes-state').textContent =
+    eyeOpen < 0.2 ? 'спит'
+      : woke < 1.4 ? `просыпается ${(1.4 - woke).toFixed(1)}с`
+        : (face.blink ?? 0) > 0.7 ? 'моргает'
+          : eyeOpen < 0.98 ? 'прищурена' : 'открыты';
+  $('sleep-toggle').textContent = eyeOpen < 0.2 ? 'Разбудить' : 'Усыпить';
+  const gazeLock = (agent.social || {}).drive ?? 0;
+  $('face-gaze-meter').style.width = pct(Math.abs(face.gaze_x ?? 0) * (0.3 + 0.7 * gazeLock));
+}
+
+/* Grow a bar out from its centre, left for negative and right for positive. */
+function setSignedMeter(el, value) {
+  const v = clampf(value, -1, 1);
+  const half = Math.abs(v) * 50;
+  el.classList.toggle('to-left', v < 0);
+  el.classList.toggle('to-right', v >= 0);
+  el.style.width = `${half}%`;
 }
 
 // ---- learning curve sparkline ----------------------------------------
@@ -1158,6 +1463,19 @@ $('meet-button').addEventListener('click', () => {
   const other = state.data.agents.find((item) => item.id !== state.selected);
   if (!other) return;
   command('meet', { id: state.selected, value: other.id });
+});
+// Sleep and startle. Together they are the only way to watch the waking
+// sequence, which is otherwise reachable only by waiting for the energy to
+// run out over minutes of simulated time.
+$('sleep-toggle').addEventListener('click', () => {
+  if (state.selected == null) return;
+  const agent = state.data && state.data.agents.find((item) => item.id === state.selected);
+  const asleep = agent ? (agent.face.eye_open ?? 1) < 0.2 : false;
+  command('sleep', { id: state.selected, value: asleep ? 0 : 1 });
+});
+$('startle-button').addEventListener('click', () => {
+  if (state.selected == null) return;
+  command('startle', { id: state.selected, value: 0.95 });
 });
 $('gait-cycle').addEventListener('click', () => {
   if (state.selected == null) return;

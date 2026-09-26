@@ -63,6 +63,8 @@ void tfly_fear(TFlyHandle *h, float v) { TFear(h, v); }
 void tfly_joy(TFlyHandle *h, float v) { TJoy(h, v); }
 void tfly_sadness(TFlyHandle *h, float v) { TSadness(h, v); }
 void tfly_anger(TFlyHandle *h, float v) { TAnger(h, v); }
+void tfly_surprise(TFlyHandle *h, float v) { TSurprise(h, v); }
+void tfly_pride(TFlyHandle *h, float v) { TPride(h, v); }
 void tfly_curiosity(TFlyHandle *h, float v) { TCuriosity(h, v); }
 void tfly_contentment(TFlyHandle *h, float v) { TContentment(h, v); }
 void tfly_dread(TFlyHandle *h, float v) { TDread(h, v); }
@@ -161,6 +163,22 @@ float tfly_mouth_open(TFlyHandle *h) { return h->mouth_open; }
 float tfly_blush(TFlyHandle *h) { return h->blush; }
 float tfly_tears(TFlyHandle *h) { return h->tears; }
 float tfly_sweat(TFlyHandle *h) { return h->sweat; }
+float tfly_eye_open(TFlyHandle *h) { return h->eye_open; }
+float tfly_eye_adapt(TFlyHandle *h) { return h->eye_adapt; }
+float tfly_wake_timer(TFlyHandle *h) { return h->wake_timer; }
+
+/* ---- gaze ---- */
+void tfly_look_at(TFlyHandle *h, float x, float y) { TLookAt(h, x, y); }
+void tfly_look_strength(TFlyHandle *h, float s) { TLookStrength(h, s); }
+void tfly_look_away(TFlyHandle *h) { TLookAway(h); }
+float tfly_look_x(TFlyHandle *h) { return h->look_x; }
+float tfly_look_y(TFlyHandle *h) { return h->look_y; }
+float tfly_look_lock(TFlyHandle *h) { return h->look_lock; }
+
+/* ---- posture ---- */
+float tfly_spine(TFlyHandle *h) { return h->spine; }
+float tfly_shoulder(TFlyHandle *h) { return h->shoulder; }
+float tfly_lean(TFlyHandle *h) { return h->lean; }
 
 /* ---- gesture and social ---- */
 int tfly_gesture(TFlyHandle *h) { return h->gesture; }

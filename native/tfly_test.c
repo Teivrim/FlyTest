@@ -650,6 +650,102 @@ static void test_face(void) {
     check(chaos.blush >= 0.0f && chaos.blush <= 1.0f, "blush survives chaos");
     check(chaos.sweat >= 0.0f && chaos.sweat <= 1.0f, "sweat survives chaos");
     check(chaos.blink == chaos.blink, "no NaN in blink");
+
+    /* ---- opening the eyes is a sequence, not a switch ---- */
+    TFLY wake;
+    TNew(&wake);
+    TSeed(&wake, 13);
+    TLight(&wake, 0.8f);
+    TSleep(&wake);
+    for (int i = 0; i < 180; i++) TSteps(&wake, 1, 1.0f / 60.0f);
+    check(wake.blink > 0.9f, "the lids are shut while she sleeps");
+    check(wake.eye_open < 0.1f, "a sleeping fly has her eyes deliberately shut");
+    TWake(&wake);
+    /* Immediately after waking the lids are still mostly down. */
+    TSteps(&wake, 1, 1.0f / 60.0f);
+    check(wake.eye_open < 0.5f, "the lids do not snap open the instant she wakes");
+    /* And they end up open. */
+    for (int i = 0; i < 200; i++) TSteps(&wake, 1, 1.0f / 60.0f);
+    check(wake.eye_open > 0.95f, "she opens her eyes on purpose");
+    check(wake.blink < 0.1f, "and ends up looking at the world");
+
+    /* Waking is not monotonic: she rubs the sleep out with partial blinks,
+     * which is what stops it reading as a switch being thrown. */
+    TFLY rub;
+    TNew(&rub);
+    TSeed(&rub, 13);
+    TSleep(&rub);
+    for (int i = 0; i < 120; i++) TSteps(&rub, 1, 1.0f / 60.0f);
+    TWake(&rub);
+    float lowest = 1.0f;
+    int reopened = 0;
+    int was_shut = 1;
+    for (int i = 0; i < 84; i++) {
+        TSteps(&rub, 1, 1.0f / 60.0f);
+        if (rub.blink < lowest) lowest = rub.blink;
+        int shut = rub.blink > 0.2f;
+        if (!shut && was_shut) reopened++;
+        was_shut = shut;
+    }
+    check(lowest < 0.4f, "the lids come most of the way up while waking");
+    check(reopened >= 1, "she blinks the sleep out on the way (partial reopen)");
+
+    /* A startle must wake her, not just lift her lids. Without this her eyes
+     * would fly open and then close again as the surprise decayed. */
+    TFLY startled;
+    TNew(&startled);
+    TSeed(&startled, 17);
+    TSleep(&startled);
+    for (int i = 0; i < 120; i++) TSteps(&startled, 1, 1.0f / 60.0f);
+    check(startled.asleep, "she is asleep to begin with");
+    TSurprise(&startled, 0.95f);
+    TSteps(&startled, 1, 1.0f / 60.0f);
+    check(!startled.asleep, "a startle wakes her");
+    /* The claim is that the lids reach the open position, not that they stay
+     * there: the wake sequence that follows deliberately blinks the sleep
+     * out, so the lids close again on the way up. */
+    float flew = 1.0f;
+    for (int i = 0; i < 30; i++) {
+        TSteps(&startled, 1, 1.0f / 60.0f);
+        if (startled.blink < flew) flew = startled.blink;
+    }
+    check(flew < 0.2f, "her eyes fly open at a startle");
+    check(startled.energy > 0.0f, "and she is roused by it");
+    /* And she stays awake rather than dropping straight back off. */
+    for (int i = 0; i < 120; i++) TSteps(&startled, 1, 1.0f / 60.0f);
+    check(!startled.asleep, "she does not fall back asleep at once");
+
+    /* ---- posture ----
+     * The body has to carry the mood too, because a face alone cannot say
+     * whether someone is braced or comfortable. */
+    TFLY afraid, proud, easy;
+    TNew(&afraid);
+    TNew(&proud);
+    TNew(&easy);
+    TSeed(&afraid, 23);
+    TSeed(&proud, 23);
+    TSeed(&easy, 23);
+    for (int i = 0; i < 600; i++) {
+        if (i % 20 == 0) TPredatorSignal(&afraid, 0.9f);
+        if (i % 20 == 0) TPride(&proud, 0.6f);
+        TSteps(&afraid, 1, 1.0f / 60.0f);
+        TSteps(&proud, 1, 1.0f / 60.0f);
+        TSteps(&easy, 1, 1.0f / 60.0f);
+    }
+    check(afraid.spine < easy.spine, "fear curls her in");
+    check(afraid.shoulder > easy.shoulder, "fear lifts her shoulders");
+    check(afraid.lean < easy.lean, "fear tips her back");
+    check(proud.spine > easy.spine, "pride straightens her up");
+    check(afraid.spine >= -1.0f && afraid.spine <= 1.0f, "spine stays in range");
+    check(proud.shoulder >= 0.0f && proud.shoulder <= 1.0f, "shoulder stays in range");
+    check(easy.lean >= -1.0f && easy.lean <= 1.0f, "lean stays in range");
+
+    /* Posture must survive being driven hard, like the rest of the face. */
+    check(chaos.spine >= -1.0f && chaos.spine <= 1.0f, "spine survives chaos");
+    check(chaos.shoulder >= 0.0f && chaos.shoulder <= 1.0f, "shoulder survives chaos");
+    check(chaos.lean >= -1.0f && chaos.lean <= 1.0f, "lean survives chaos");
+    check(chaos.eye_open >= 0.0f && chaos.eye_open <= 1.0f, "eye_open survives chaos");
+    check(chaos.eye_adapt >= 0.0f && chaos.eye_adapt <= 1.0f, "eye_adapt survives chaos");
 }
 
 /* ------------------------------------------------------------------ *
@@ -769,6 +865,62 @@ static void test_encounters(void) {
     check(TFlyEncounterName(99) != NULL, "an out of range encounter still has a name");
 }
 
+/* ------------------------------------------------------------------ *
+ * Gaze. A decided target has to be able to hold, and alarm has to be
+ * able to break it.
+ * ------------------------------------------------------------------ */
+static void test_gaze(void) {
+    printf("gaze\n");
+
+    TFLY fly;
+    TNew(&fly);
+    TSeed(&fly, 29);
+    for (int i = 0; i < 120; i++) TSteps(&fly, 1, 1.0f / 60.0f);
+    float drift = fly.gaze_x;
+
+    /* Naming a target is itself an act of attention, so it takes hold. */
+    TLookAt(&fly, -0.8f, 0.2f);
+    check(fly.look_lock >= 0.5f, "naming a target takes hold on its own");
+    TLookStrength(&fly, 1.0f);
+    for (int i = 0; i < 120; i++) TSteps(&fly, 1, 1.0f / 60.0f);
+    check(fly.gaze_x < drift - 0.2f, "she looks where she decided");
+    check(fly.gaze_y > 0.05f, "including vertically");
+
+    /* Letting go brings the idle drift back, so a stale target does not pin
+     * her eyes for the rest of the session. */
+    TLookAway(&fly);
+    check(fly.look_lock == 0.0f, "look_away releases the lock");
+    for (int i = 0; i < 240; i++) TSteps(&fly, 1, 1.0f / 60.0f);
+
+    /* Alarm of any kind must break the lock, not just a predator signal: a
+     * frightened fly is not staring at her friend. */
+    TFLY scared;
+    TNew(&scared);
+    TSeed(&scared, 31);
+    TLookAt(&scared, 0.8f, 0.0f);
+    TLookStrength(&scared, 1.0f);
+    for (int i = 0; i < 120; i++) TSteps(&scared, 1, 1.0f / 60.0f);
+    float watching = scared.gaze_x;
+    check(watching > 0.3f, "she was watching the thing she chose");
+    for (int i = 0; i < 30; i++) {
+        TFear(&scared, 0.9f);
+        TSteps(&scared, 1, 1.0f / 60.0f);
+    }
+    check(scared.gaze_x < watching, "but fear breaks the gaze lock");
+
+    /* The lock must not be able to hold her past her own range. */
+    TLookAt(&fly, 99.0f, -99.0f);
+    check(fly.look_x <= 1.0f && fly.look_x >= -1.0f, "an absurd target is clamped");
+    TLookStrength(&fly, 99.0f);
+    check(fly.look_lock <= 1.0f, "an absurd lock is clamped");
+    TLookStrength(&fly, -5.0f);
+    check(fly.look_lock >= 0.0f, "a negative lock is clamped");
+    TLookAt(NULL, 0.0f, 0.0f);
+    TLookStrength(NULL, 1.0f);
+    TLookAway(NULL);
+    check(1, "a null fly ignores every gaze command");
+}
+
 int main(void) {
     printf("TFLY.h v%d.%d self test\n\n", TFLY_VERSION_MAJOR, TFLY_VERSION_MINOR);
 
@@ -787,6 +939,7 @@ int main(void) {
     test_scenario_nociception();
     test_face();
     test_encounters();
+    test_gaze();
 
     printf("\n");
     if (failures == 0) {
