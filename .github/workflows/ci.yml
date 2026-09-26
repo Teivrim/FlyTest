@@ -36,15 +36,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # На образах windows-latest MinGW лежит в C:\mingw64
+      # MinGW есть в образе windows-latest по пути C:\mingw64.
+      # Шаг НЕ должен падать, если компилятора нет: об этом честнее
+      # сообщит сам cargo build, давая внятную ошибку линковки. Раньше
+      # здесь стоял `(g++ --version)[0]`, и отсутствие компилятора
+      # роняло весь job с невнятным CommandNotFoundException.
       - name: Подготовить MinGW
         shell: pwsh
         run: |
-          $env:PATH = "C:\mingw64\bin;$env:PATH"
-          "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-          "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          # head -1 здесь не работает: это pwsh-шаг, а head из bash
-          (g++ --version)[0]
+          $candidates = @("C:\mingw64\bin", "C:\msys64\mingw64\bin",
+                          "C:\ProgramData\mingw64\mingw64\bin")
+          $found = $null
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c "g++.exe")) { $found = $c; break }
+          }
+          if ($found) {
+            "MinGW найден: $found"
+            $env:PATH = "$found;$env:PATH"
+            $found | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            $found | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            & (Join-Path $found "g++.exe") --version | Select-Object -First 1
+          } else {
+            "MinGW не найден. Сборка C-ядра невозможна, Rust-часть "
+            "соберётся без него (build.rs это умеет)."
+            "warning: MinGW отсутствует, ядро TFLY не будет собрано"
+          }
 
       # Готовые actions не берут хост в названии канала:
       # «target tuple in channel name 'stable-x86_64-pc-windows-gnu'».
