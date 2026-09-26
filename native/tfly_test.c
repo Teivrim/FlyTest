@@ -265,6 +265,53 @@ static void test_learning(void) {
     TPlasticity(&gated, 1.0f);
     TResetLearning(&gated);
     check_near(gated.assoc[T_CUE_SOUND][T_ACT_TURN_L], 0.0f, 1e-5, "learning can be wiped");
+
+    /* The learning rate is exposed so the pace of a lesson can be watched at both
+     * ends. It must stay a multiplier on a permitted update and nothing else: a
+     * shut gate has to refuse every update however high the rate is, or the
+     * three-factor rule is decoration. */
+    check_near(TLearnRateOf(&gated), 1.0f, 1e-5, "a new fly learns at the default rate");
+    TLearnRate(&gated, 20.0f);
+    check_near(TLearnRateOf(&gated), 20.0f, 1e-5, "the rate is settable");
+    TResetLearning(&gated);
+    for (int i = 0; i < 2000; i++) {
+        TAssociate(&gated, T_CUE_LIGHT, T_ACT_DANCE, 1.0f, 0.0f);
+    }
+    check_near(gated.assoc[T_CUE_LIGHT][T_ACT_DANCE], 0.0f, 1e-5,
+               "a shut gate refuses every update at rate 20");
+
+    /* And a high rate must reach the same weight in fewer trials, not a
+     * different one. The action has to be performed first, because the
+     * eligibility trace is built from the motor output and not from the call
+     * to associate: a trial that only calls TAssociate teaches nothing at any
+     * rate, which is the whole reason the harness lets the fly act. */
+    int trials_for[2];
+    for (int which = 0; which < 2; which++) {
+        TFLY paced;
+        TNew(&paced);
+        TLearnRate(&paced, which == 0 ? 1.0f : 10.0f);
+        int n = 0;
+        while (n < 20000 && paced.assoc[T_CUE_SOUND][T_ACT_DANCE] < 0.8f) {
+            TAct(&paced, T_ACT_DANCE, 1.0f);
+            TSteps(&paced, 2, 1.0f / 60.0f);
+            TAssociate(&paced, T_CUE_SOUND, T_ACT_DANCE, 1.0f, 1.0f);
+            n++;
+        }
+        trials_for[which] = n;
+    }
+    check(trials_for[0] < 20000, "the default rate reaches the lesson");
+    check(trials_for[1] < trials_for[0], "a higher rate needs fewer trials");
+
+    /* The rate is clamped, so a wild number cannot produce an unstable step. */
+    TFLY wild;
+    TNew(&wild);
+    TLearnRate(&wild, 1e6f);
+    check(TLearnRateOf(&wild) <= 20.0f, "the learning rate is clamped");
+    for (int i = 0; i < 5000; i++) {
+        TAssociate(&wild, T_CUE_VIBRATION, T_ACT_TURN_R, 1.0f, 2.0f);
+    }
+    check(wild.assoc[T_CUE_VIBRATION][T_ACT_TURN_R] <= 1.0f,
+          "a clamped rate still keeps weights inside their bounds");
 }
 
 /* ------------------------------------------------------------------ */

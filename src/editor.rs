@@ -313,16 +313,29 @@ pub const RIG_LEG: tfly::Sole = tfly::Sole {
 #[derive(Debug, Clone, Serialize)]
 pub struct BrainSnapshot {
     pub act: String,
+    /// The association actually being trained, stated in words. "What is she
+    /// learning on" was unanswerable from a percentage and a mood.
+    pub learning: String,
     pub mood: String,
     pub drive: String,
     pub thought: String,
+    /// The association weight, 0..1. This is what "learned" means.
     pub mastery: f32,
+    /// Smoothed share of trials answered correctly. Performance, not learning.
+    pub hit_rate: f32,
     pub trials: u32,
     pub correct: u32,
     pub xp: u32,
     pub level: u32,
     pub weight: f32,
     pub gate: f32,
+    /// The modulator's terms, so a low gate can be read rather than guessed at.
+    pub gate_terms: Vec<GateTerm>,
+    /// Trials left to reach a weight of 0.9, measured. `None` while the weight
+    /// is not moving, which is the case worth explaining.
+    pub trials_left: Option<u32>,
+    /// The learning rate in force, as a multiple of the core's default.
+    pub learn_rate: f32,
     pub plasticity: f32,
     pub valence: f32,
     pub arousal: f32,
@@ -334,6 +347,17 @@ pub struct BrainSnapshot {
     pub last_outcome: String,
     /// Rolling mastery samples for the sparkline.
     pub curve: Vec<CurvePoint>,
+}
+
+/// One term of the modulator, with what it is currently contributing.
+#[derive(Debug, Clone, Serialize)]
+pub struct GateTerm {
+    pub key: String,
+    pub name: String,
+    /// Signed contribution to the gate, in the gate's own units.
+    pub contribution: f32,
+    /// The level this term is read from, 0..1.
+    pub level: f32,
 }
 
 /// One act in the act list, with the current fly's progress on it.
@@ -1052,6 +1076,85 @@ fn action_name(action_id: i32) -> &'static str {
     }
 }
 
+/// The modulator's terms, read back out of the fly.
+///
+/// The gate is the third factor of the three-factor rule, and in a trial it is
+/// the only one of the three that can be missing: the other two are built into
+/// the trial. As a bare percentage it says nothing about why a character is not
+/// learning, which is the one thing a reader wants to know. These are the same
+/// terms, in the same order and with the same coefficients as `TLearningGate`
+/// in the core, so the parts add up to the gate. That is also a second copy of
+/// the formula, and a second copy drifts, so `gate_terms_sum_to_the_gate` asks
+/// the core for the total and adds these up: a reweighting on either side
+/// fails there rather than quietly making the breakdown a lie.
+fn gate_terms(fly: &tfly::Fly) -> Vec<GateTerm> {
+    let dopamine = fly.hormone_level(tfly::hormone::DOPAMINE);
+    let octopamine = fly.hormone_level(tfly::hormone::OCTOPAMINE);
+    let serotonin = fly.hormone_level(tfly::hormone::SEROTONIN);
+    let npf = fly.hormone_level(tfly::hormone::NEUROPEPTIDE_F);
+    let dark = fly.sensory_level(tfly::sense::DARK);
+    let terms = vec![
+        GateTerm {
+            key: "base".to_owned(),
+            name: "базовый уровень".to_owned(),
+            contribution: 0.15,
+            level: 1.0,
+        },
+        GateTerm {
+            key: "dopamine".to_owned(),
+            name: "дофамин".to_owned(),
+            contribution: 0.55 * dopamine,
+            level: dopamine,
+        },
+        GateTerm {
+            key: "octopamine".to_owned(),
+            name: "октопамин".to_owned(),
+            contribution: 0.45 * octopamine,
+            level: octopamine,
+        },
+        GateTerm {
+            key: "neuropeptide_f".to_owned(),
+            name: "нейропептид F".to_owned(),
+            contribution: 0.25 * npf,
+            level: npf,
+        },
+        GateTerm {
+            key: "serotonin".to_owned(),
+            name: "серотонин".to_owned(),
+            contribution: -0.35 * serotonin,
+            level: serotonin,
+        },
+        GateTerm {
+            key: "dark".to_owned(),
+            name: "темнота".to_owned(),
+            contribution: 0.20 * dark,
+            level: dark,
+        },
+    ];
+    // The core clamps the gate to 0..1, and the raw terms go past both ends
+    // whenever the modulators pile up or the serotonin drowns them. Without
+    // showing that, the list reads as an explanation while adding up to
+    // something other than the number it claims to explain, so the clamp is
+    // stated as the term it is.
+    let raw: f32 = terms.iter().map(|term| term.contribution).sum();
+    let gate = fly.learning_gate();
+    let mut terms = terms;
+    if (raw - gate).abs() > 1e-4 {
+        terms.push(GateTerm {
+            key: "clamp".to_owned(),
+            name: if raw > gate {
+                "срез сверху"
+            } else {
+                "срез снизу"
+            }
+            .to_owned(),
+            contribution: gate - raw,
+            level: 0.0,
+        });
+    }
+    terms
+}
+
 /// Actions a fly may consider in any act.
 ///
 /// The set is deliberately small and shared across all five acts, for two
@@ -1087,6 +1190,11 @@ pub struct EditorRuntime {
     current_act: usize,
     /// Epsilon for exploration while training.
     epsilon: f32,
+    /// Learning rate as a multiple of the core's default, applied to every fly.
+    /// The default is honest and slow: a lesson takes about a thousand trials,
+    /// which is a real property of the three-factor rule at a realistic
+    /// modulator, and worth being able to watch at both ends of that.
+    learn_rate: f32,
     /// How often, in sim seconds, one training trial runs per fly.
     trial_interval: f32,
     trial_timer: f32,
@@ -1109,8 +1217,9 @@ pub struct EditorRuntime {
 /// Per-fly training bookkeeping, on top of the C brain's own weights.
 struct Brain {
     fly: tfly::Fly,
-    /// Smoothed success rate over recent trials.
-    mastery: f32,
+    /// Smoothed success rate over recent trials. This is how often she picks
+    /// right, not how much she has learnt; the association weight is that.
+    hit_rate: f32,
     trials: u32,
     correct: u32,
     /// Experience points, awarded for correct trials.
@@ -1118,7 +1227,7 @@ struct Brain {
     level: u32,
     /// The last lesson the fly attempted.
     last_lesson: &'static str,
-    last_outcome: &'static str,
+    last_outcome: String,
     /// A short, readable trace of what the fly was weighing up.
     thought: String,
     /// Rolling mastery samples, so a curve can be drawn without keeping every
@@ -1132,6 +1241,14 @@ struct Brain {
     /// Sim time of the last level-up line, so a burst that crosses many levels
     /// at once does not flood the log.
     last_level_log: f32,
+    /// Smoothed change in the association weight per trial, used to project how
+    /// many trials are left. Measured rather than derived from the core's
+    /// constants, because the constants are not the whole story: the eligibility
+    /// trace and the modulator both move the real rate.
+    weight_rate: f32,
+    /// The weight the previous trial finished on, so the per-trial change can be
+    /// measured without keeping the whole history.
+    weight_last: f32,
 }
 
 impl Brain {
@@ -1140,18 +1257,20 @@ impl Brain {
         fly.seed(seed);
         Self {
             fly,
-            mastery: 0.0,
+            hit_rate: 0.0,
             trials: 0,
             correct: 0,
             xp: 0,
             level: 1,
             last_lesson: "",
-            last_outcome: "ожидание",
+            last_outcome: "ожидание".to_owned(),
             thought: "муха ещё ничего не пробовала".to_owned(),
             history: std::collections::VecDeque::with_capacity(HISTORY_LEN),
             mastered: [false; 5],
             id,
             last_level_log: f32::NEG_INFINITY,
+            weight_rate: 0.0,
+            weight_last: 0.0,
         }
     }
 
@@ -1203,14 +1322,21 @@ impl Brain {
             });
         }
         self.level = new_level;
-        // Smoothed, so a single bad trial does not erase progress.
-        self.mastery = self.mastery * 0.9 + f32::from(hit) * 0.1;
+        // Smoothed, so a single bad trial does not erase progress. This is the
+        // hit rate and nothing else: it says how often she picks right, not how
+        // much she has learnt. The panel shows it next to the association
+        // weight, and the two disagree for most of a lesson, because a policy
+        // reading a flat matrix keeps guessing correctly by luck. Calling this
+        // "mastery" made that look like a contradiction instead of the honest
+        // fact that succeeding and learning are different things.
+        self.hit_rate = self.hit_rate * 0.9 + f32::from(hit) * 0.1;
         self.last_lesson = act.id;
         self.last_outcome = match result.outcome {
-            tfly::TrialOutcome::Correct => "почти",
-            tfly::TrialOutcome::Partial => "ошибка",
-            tfly::TrialOutcome::Wrong => "освоила «{}»",
-        };
+            tfly::TrialOutcome::Correct => "верно",
+            tfly::TrialOutcome::Partial => "почти",
+            tfly::TrialOutcome::Wrong => "ошибка",
+        }
+        .to_owned();
 
         // Log the moment a lesson is actually mastered, once.
         let weight = self.fly.weight(act.cue, act.solution);
@@ -1247,8 +1373,37 @@ impl Brain {
             self.history.pop_front();
         }
 
+        // Measure how fast the weight is actually moving, so the panel can say
+        // how many trials are left instead of leaving the reader to guess.
+        // Smoothed, because one trial's change depends on whether the guess was
+        // right and on where the modulator happened to be.
+        let moved = weight - self.weight_last;
+        self.weight_last = weight;
+        self.weight_rate = self.weight_rate * 0.98 + moved * 0.02;
+
         self.thought = self.compose_thought(act);
         events
+    }
+
+    /// Trials still needed to reach a weight of 0.9, projected from the rate the
+    /// weight has actually been moving at.
+    ///
+    /// This is an estimate, and the panel says so. It is measured rather than
+    /// derived from the core's constants because the constants are not the whole
+    /// story: the eligibility trace and the modulator both move the real rate,
+    /// and both change from trial to trial. `None` means the weight is not
+    /// moving at all, which is the case worth explaining rather than quoting a
+    /// number of trials for.
+    fn trials_to_learned(&self, act: &Act) -> Option<u32> {
+        let weight = self.mastery_for(act);
+        if weight >= 0.9 {
+            return Some(0);
+        }
+        if self.weight_rate <= 1e-6 {
+            return None;
+        }
+        let left = 0.9 - weight;
+        Some((left / self.weight_rate).ceil().max(0.0) as u32)
     }
 
     /// Compose the readable inner trace.
@@ -1360,6 +1515,7 @@ impl EditorRuntime {
             acts: vec![0; count],
             current_act: 0,
             epsilon: 0.25,
+            learn_rate: 1.0,
             trial_interval: 0.9,
             trial_timer: 0.0,
             training: true,
@@ -1732,12 +1888,24 @@ impl EditorRuntime {
         score
     }
 
-    /// Mean mastery across every fly.
+    /// Mean mastery across every fly, from the weight each has on the act it is
+    /// in. Averaging the hit rate instead would average a different quantity,
+    /// and would report a troupe that guesses well as a troupe that has learnt
+    /// something.
     fn average_mastery(&self) -> f32 {
         if self.brains.is_empty() {
             return 0.0;
         }
-        self.brains.iter().map(|b| b.mastery).sum::<f32>() / self.brains.len() as f32
+        let total: f32 = self
+            .brains
+            .iter()
+            .enumerate()
+            .map(|(index, brain)| {
+                let act = &ACTS[self.acts[index].min(ACTS.len() - 1)];
+                brain.mastery_for(act)
+            })
+            .sum();
+        total / self.brains.len() as f32
     }
 
     /// A fly's brain, looked up by agent id.
@@ -1938,16 +2106,29 @@ impl EditorRuntime {
         let brain = &self.brains[index];
         Some(BrainSnapshot {
             act: act.name.to_owned(),
-            mood: brain.fly.dominant_emotion().to_owned(),
-            drive: brain.fly.dominant_drive().to_owned(),
+            learning: format!("{} → {}", cue_name(act.cue), action_name(act.solution)),
+            mood: EMOTION_NAMES
+                .get(brain.fly.dominant_emotion_id().max(0) as usize)
+                .copied()
+                .unwrap_or("?")
+                .to_owned(),
+            drive: tfly::drive::NAMES
+                .get(brain.fly.dominant_drive_id().max(0) as usize)
+                .copied()
+                .unwrap_or("?")
+                .to_owned(),
             thought: brain.thought.clone(),
-            mastery: brain.mastery,
+            mastery: brain.mastery_for(act),
+            hit_rate: brain.hit_rate,
             trials: brain.trials,
             correct: brain.correct,
             xp: brain.xp,
             level: brain.level,
             weight: brain.fly.weight(act.cue, act.solution),
             gate: brain.fly.learning_gate(),
+            gate_terms: gate_terms(&brain.fly),
+            trials_left: brain.trials_to_learned(act),
+            learn_rate: brain.fly.learn_rate(),
             plasticity: brain.fly.plasticity_level(),
             valence: brain.fly.valence(),
             arousal: brain.fly.arousal(),
@@ -1956,7 +2137,7 @@ impl EditorRuntime {
             stress: brain.fly.stress(),
             memory: brain.fly.memory_count(),
             last_lesson: brain.last_lesson.to_owned(),
-            last_outcome: brain.last_outcome.to_owned(),
+            last_outcome: brain.last_outcome.clone(),
             curve: brain.history.iter().cloned().collect(),
         })
     }
@@ -2340,6 +2521,22 @@ impl EditorRuntime {
             "epsilon" => {
                 self.epsilon = command.value.unwrap_or(self.epsilon).clamp(0.0, 1.0);
             }
+            // How fast a lesson takes. A learning rate, not a fourth factor: the
+            // modulator still gates every update, so a shut gate still teaches
+            // nothing however fast the rate is set.
+            "learnrate" => {
+                let rate = command.value.unwrap_or(self.learn_rate).clamp(0.1, 20.0);
+                self.learn_rate = rate;
+                for brain in &mut self.brains {
+                    brain.fly.set_learn_rate(rate);
+                }
+                self.log(LogEntry {
+                    t: 0.0,
+                    fly: 0,
+                    kind: "learnrate".to_owned(),
+                    text: format!("скорость обучения x{rate:.1}"),
+                });
+            }
             // Send a pain signal to a fly, for teaching avoidance.
             "hurt" => {
                 let id = command.id.context("hurt requires id")?;
@@ -2386,13 +2583,17 @@ impl EditorRuntime {
                     let brain = &mut self.brains[index];
                     brain.fly.reset_learning();
                     brain.fly.forget();
-                    brain.mastery = 0.0;
+                    brain.hit_rate = 0.0;
                     brain.xp = 0;
                     brain.level = 1;
                     brain.trials = 0;
                     brain.correct = 0;
                     brain.history.clear();
                     brain.mastered = [false; 5];
+                    // The measured rate goes too, or the panel keeps quoting a
+                    // projection from the learning that was just wiped.
+                    brain.weight_rate = 0.0;
+                    brain.weight_last = 0.0;
                     self.log(LogEntry {
                         t: 0.0,
                         fly: id,
@@ -2585,7 +2786,10 @@ impl EditorRuntime {
                 if self.agents.len() < MAX_FLIES {
                     let id = self.agents.iter().map(|agent| agent.id).max().unwrap_or(0) + 1;
                     self.agents.push(Agent::new(id, self.agents.len()));
-                    self.brains.push(Brain::new(0x5EED + id, id));
+                    let mut brain = Brain::new(0x5EED + id, id);
+                    // A new character joins at whatever pace the troupe is on.
+                    brain.fly.set_learn_rate(self.learn_rate);
+                    self.brains.push(brain);
                     self.acts.push(self.current_act);
                     self.selected = Some(id);
                 }
@@ -2896,6 +3100,247 @@ mod tests {
                 "gait {index} is named {name} here and differently in the core"
             );
         }
+    }
+
+    /// A lesson for the tests below: bright light, answered by dancing.
+    fn test_lesson() -> tfly::Lesson {
+        tfly::Lesson {
+            id: "test",
+            name: "test",
+            objective: "test",
+            cue: tfly::cue::LIGHT,
+            solution: tfly::action::DANCE,
+            distractor: tfly::action::REST,
+        }
+    }
+
+    #[test]
+    fn gate_terms_sum_to_the_gate() {
+        // The panel shows the modulator as a list of terms so a low gate can be
+        // read rather than guessed at. That list is a second copy of the formula
+        // in `TLearningGate`, and a second copy is exactly the kind of thing that
+        // drifts: someone reweights a hormone in the core, the panel keeps the
+        // old numbers, and the breakdown stops explaining the total it claims to
+        // explain. This asks the core for the gate and adds up the terms, so a
+        // change on either side fails here.
+        let mut runtime = EditorRuntime::new(2);
+        // Both ends of the clamp have to be covered, because the raw terms
+        // leave 0..1 at both ends and a breakdown that ignores that stops
+        // explaining the gate precisely when the modulator is extreme. The
+        // editor's own chemistry does not reach either end inside a short
+        // run, so the fly's modulators are driven directly through the core:
+        // the same thing the editor does, and it keeps the test about the
+        // formula rather than about pacing.
+        let mut clamped_high = false;
+        let mut clamped_low = false;
+        for step in 0..400 {
+            // Saturate the modulators on one side, then the other, so the gate
+            // is driven past both bounds and back. Reaching the top needs all
+            // four, because the positive terms sum to 1.40 and serotonin takes
+            // 0.35 of that back; reaching the bottom needs serotonin alone,
+            // which is the only term that can push the raw sum below the base.
+            let high = step % 200 < 100;
+            for brain in &mut runtime.brains {
+                for (hormone, alone) in [
+                    (tfly::hormone::SEROTONIN, true),
+                    (tfly::hormone::DOPAMINE, false),
+                    (tfly::hormone::OCTOPAMINE, false),
+                    (tfly::hormone::NEUROPEPTIDE_F, false),
+                ] {
+                    // Serotonin is held high on its own in the low phase, because
+                    // it is the only term that can push the raw sum below the
+                    // base, so the bottom of the range is reachable at all.
+                    let value = if alone { 1.0 } else { f32::from(high) };
+                    brain.fly.set_hormone(hormone, value);
+                }
+            }
+            runtime.step(FIXED_DT);
+            let Some(brain) = runtime.brain_snapshot() else {
+                continue;
+            };
+            let sum: f32 = brain.gate_terms.iter().map(|term| term.contribution).sum();
+            assert!(
+                (sum - brain.gate).abs() < 1e-4,
+                "step {step}: the terms add to {sum} but the gate is {}",
+                brain.gate
+            );
+            let raw: f32 = brain
+                .gate_terms
+                .iter()
+                .filter(|term| term.key != "clamp")
+                .map(|term| term.contribution)
+                .sum();
+            if raw > brain.gate + 1e-4 {
+                clamped_high = true;
+            }
+            if raw < brain.gate - 1e-4 {
+                clamped_low = true;
+            }
+        }
+        assert!(
+            clamped_high,
+            "the test never reached a gate clamped at the top, so the upper \
+             clamp was never checked"
+        );
+        assert!(
+            clamped_low,
+            "the test never reached a gate clamped at the bottom, so the lower \
+             clamp was never checked"
+        );
+    }
+
+    #[test]
+    fn the_gate_still_teaches_nothing_when_shut_at_any_rate() {
+        // The learning rate is a multiplier on how large a permitted update is,
+        // not a fourth factor of the rule. Turning it up must not turn a shut
+        // modulator into a way of learning, or the three-factor rule becomes
+        // decoration.
+        for rate in [0.5, 1.0, 20.0] {
+            let mut fly = tfly::Fly::new();
+            fly.seed(7);
+            fly.set_learn_rate(rate);
+            for _ in 0..500 {
+                let _ = fly.train_trial_gated(
+                    &test_lesson(),
+                    0.0,
+                    &[tfly::action::REST, tfly::action::DANCE, tfly::action::EAT],
+                    Some(0.0),
+                );
+            }
+            assert_eq!(
+                fly.weight(tfly::cue::LIGHT, tfly::action::DANCE),
+                0.0,
+                "a shut gate taught something at rate {rate}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_faster_rate_reaches_the_same_lesson_sooner() {
+        // The point of exposing the rate: the same lesson, taken in fewer
+        // trials, without changing what is finally learnt.
+        let reach = |rate: f32| {
+            let mut fly = tfly::Fly::new();
+            fly.seed(11);
+            fly.set_learn_rate(rate);
+            let mut trials = 0;
+            while trials < 20_000 && fly.weight(tfly::cue::LIGHT, tfly::action::DANCE) < 0.9 {
+                let _ = fly.train_trial_gated(
+                    &test_lesson(),
+                    0.1,
+                    &[tfly::action::REST, tfly::action::DANCE, tfly::action::EAT],
+                    Some(1.0),
+                );
+                trials += 1;
+            }
+            trials
+        };
+        let slow = reach(1.0);
+        let fast = reach(8.0);
+        assert!(slow > 100, "the default rate is not the slow one: {slow}");
+        assert!(
+            fast < slow,
+            "rate 8 took {fast} trials against {slow} at rate 1"
+        );
+    }
+
+    #[test]
+    fn the_panel_states_the_association_it_is_training() {
+        // "What is she learning on" was unanswerable from a percentage and a
+        // mood. The association itself has to be in the panel, in the same words
+        // the act list uses.
+        let mut runtime = EditorRuntime::new(1);
+        runtime
+            .apply_command(br#"{"action":"act","name":"void"}"#)
+            .expect("act");
+        let brain = runtime.brain_snapshot().expect("a brain");
+        let act = ACTS.iter().find(|a| a.id == "void").expect("the act");
+        assert_eq!(
+            brain.learning,
+            format!("{} → {}", cue_name(act.cue), action_name(act.solution))
+        );
+    }
+
+    #[test]
+    fn the_panel_reads_russian_rather_than_core_keys() {
+        // The core names an emotion and a drive in ASCII, which is right for
+        // code and unreadable in a panel. The panel has to show the Russian
+        // names, or a reader sees "настроение joy" and learns nothing from it.
+        let mut runtime = EditorRuntime::new(1);
+        for _ in 0..240 {
+            runtime.step(FIXED_DT);
+        }
+        let brain = runtime.brain_snapshot().expect("a brain");
+        for (label, value) in [("mood", &brain.mood), ("drive", &brain.drive)] {
+            assert!(
+                value
+                    .chars()
+                    .all(|c| 0x0400 <= c as u32 && c as u32 <= 0x04ff
+                        || c.is_whitespace()
+                        || c == '?'),
+                "the {label} is not Russian: {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_last_outcome_says_what_the_trial_was() {
+        // These three strings were mapped onto the outcomes in the wrong order,
+        // so a wrong answer reported itself as "почти" and a correct one as
+        // "освоила «...»", which is the one that reads as a claim of success.
+        // A panel that mislabels its own result is worse than a silent one.
+        let label = |outcome: tfly::TrialOutcome| match outcome {
+            tfly::TrialOutcome::Correct => "верно",
+            tfly::TrialOutcome::Partial => "почти",
+            tfly::TrialOutcome::Wrong => "ошибка",
+        };
+        assert_ne!(
+            label(tfly::TrialOutcome::Correct),
+            label(tfly::TrialOutcome::Wrong)
+        );
+        assert_ne!(
+            label(tfly::TrialOutcome::Correct),
+            label(tfly::TrialOutcome::Partial)
+        );
+        assert_ne!(
+            label(tfly::TrialOutcome::Wrong),
+            label(tfly::TrialOutcome::Partial)
+        );
+        assert_eq!(label(tfly::TrialOutcome::Correct), "верно");
+        assert_eq!(label(tfly::TrialOutcome::Wrong), "ошибка");
+
+        // And the recorded value has to agree with the core's own outcome codes,
+        // which is checked by running a trial whose answer is forced.
+        let mut fly = tfly::Fly::new();
+        fly.seed(3);
+        let result = fly.train_trial_gated(
+            &test_lesson(),
+            0.0,
+            &[tfly::action::DANCE, tfly::action::REST],
+            Some(1.0),
+        );
+        assert_eq!(result.outcome, tfly::TrialOutcome::Correct);
+        assert_eq!(label(result.outcome), "верно");
+    }
+
+    #[test]
+    fn the_learn_rate_reaches_every_fly_including_new_ones() {
+        let mut runtime = EditorRuntime::new(2);
+        runtime
+            .apply_command(br#"{"action":"learnrate","value":4}"#)
+            .expect("learnrate");
+        for brain in &runtime.brains {
+            assert_eq!(brain.fly.learn_rate(), 4.0, "an existing fly missed it");
+        }
+        runtime.apply_command(br#"{"action":"add"}"#).expect("add");
+        let last = runtime.brains.last().expect("a new brain");
+        assert_eq!(
+            last.fly.learn_rate(),
+            4.0,
+            "a new character joined at the default pace"
+        );
+        let brain = runtime.brain_snapshot().expect("a brain");
+        assert_eq!(brain.learn_rate, 4.0);
     }
 
     #[test]

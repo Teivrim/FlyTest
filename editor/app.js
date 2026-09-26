@@ -1202,16 +1202,37 @@ function renderBrain(data) {
     return;
   }
   const pct = (v) => `${Math.round(Math.max(0, Math.min(1, v)) * 100)}%`;
+  const signed = (v) => `${v >= 0 ? '+' : '−'}${Math.abs(Math.round(v * 100))}`;
+  $('brain-learning').textContent = brain.learning || '— → —';
   $('brain-thought').textContent = brain.thought;
   $('brain-level').textContent = `ур. ${brain.level}`;
+  // The weight is the headline, because the weight is what "learned" means. The
+  // hit rate sits beside it and is labelled as guessing, because a policy
+  // reading a flat matrix keeps answering correctly by luck and a reader who
+  // sees one percentage next to another cannot tell which is which.
   $('brain-mastery').textContent = pct(brain.mastery);
   $('brain-mastery-meter').style.width = pct(brain.mastery);
-  $('brain-weight').textContent = pct(brain.weight);
-  $('brain-weight-meter').style.width = pct(brain.weight);
+  $('brain-left').textContent = brain.trials_left === 0
+    ? 'урок выучен'
+    : brain.trials_left == null
+      ? 'вес не движется'
+      : `осталось проб: ~${brain.trials_left}`;
+  $('brain-weight').textContent = pct(brain.hit_rate ?? 0);
+  $('brain-weight-meter').style.width = pct(brain.hit_rate ?? 0);
   $('brain-gate').textContent = pct(brain.gate);
   $('brain-gate-meter').style.width = pct(brain.gate);
   $('brain-plasticity').textContent = pct(brain.plasticity);
   $('brain-plasticity-meter').style.width = pct(brain.plasticity);
+  // The modulator, term by term, so a gate at 12% can be read instead of
+  // guessed at. Re-rendered only when the numbers change, because this is the
+  // one part of the panel with more rows than the eye wants to track.
+  const terms = (brain.gate_terms || [])
+    .map((t) => `${t.name} ${signed(t.contribution)}`)
+    .join(' · ');
+  if (terms !== renderBrain.lastTerms) {
+    $('gate-terms').textContent = terms;
+    renderBrain.lastTerms = terms;
+  }
   $('brain-trials').textContent = String(brain.trials);
   $('brain-correct').textContent = String(brain.correct);
   $('brain-xp').textContent = String(brain.xp);
@@ -1219,6 +1240,9 @@ function renderBrain(data) {
   $('brain-mood').textContent = brain.mood;
   $('brain-drive').textContent = brain.drive;
   $('brain-outcome').textContent = brain.last_outcome;
+  const rate = brain.learn_rate ?? 1;
+  if ($('learnrate') !== document.activeElement) $('learnrate').value = String(rate);
+  $('learnrate-value').textContent = `x${Number(rate).toFixed(1)}`;
   drawCurve(brain.curve || []);
   renderLog(data.training.log || [], data.training.log_path);
   // The agent is resolved here rather than assumed: renderBrain only receives
@@ -1674,6 +1698,7 @@ $('adventure-select').addEventListener('change', (event) => command('adventure',
 $('train-burst').addEventListener('click', () => command('train', { value: 200 }));
 $('training-toggle').addEventListener('click', () => command('training', { enabled: !(state.data && state.data.training && state.data.training.enabled) }));
 $('epsilon').addEventListener('input', (event) => command('epsilon', { value: Number(event.target.value) }));
+$('learnrate').addEventListener('input', (event) => command('learnrate', { value: Number(event.target.value) }));
 $('brain-hurt').addEventListener('click', () => { if (state.selected != null) command('hurt', { id: state.selected, value: 0.8 }); });
 $('brain-dopamine').addEventListener('click', () => { if (state.selected != null) command('hormone', { id: state.selected, name: 'dopamine', value: 0.8 }); });
 $('brain-unlearn').addEventListener('click', () => { if (state.selected != null) command('unlearn', { id: state.selected }); });

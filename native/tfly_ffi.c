@@ -83,6 +83,9 @@ void tfly_associate(TFlyHandle *h, int cue, int action, float outcome, float mod
 void tfly_reward(TFlyHandle *h, float v) { TReward(h, v); }
 void tfly_punish(TFlyHandle *h, float v) { TPunish(h, v); }
 void tfly_plasticity(TFlyHandle *h, float v) { TPlasticity(h, v); }
+void tfly_set_hormone(TFlyHandle *h, int hormone, float v) { TSetHormone(h, hormone, v); }
+void tfly_learn_rate(TFlyHandle *h, float v) { TLearnRate(h, v); }
+float tfly_learn_rate_level(TFlyHandle *h) { return TLearnRateOf(h); }
 void tfly_reset_learning(TFlyHandle *h) { TResetLearning(h); }
 float tfly_learning_gate(TFlyHandle *h) { return TLearningGate(h); }
 float tfly_assoc_weight(TFlyHandle *h, int cue, int action) { return h->assoc[TClampIdx(cue, TFLY_N_CUE)][TClampIdx(action, TFLY_N_ACTION)]; }

@@ -109,6 +109,9 @@ unsafe extern "C" {
     fn tfly_reward(handle: *mut TFlyHandle, v: c_float);
     fn tfly_punish(handle: *mut TFlyHandle, v: c_float);
     fn tfly_plasticity(handle: *mut TFlyHandle, v: c_float);
+    fn tfly_set_hormone(handle: *mut TFlyHandle, hormone: c_int, v: c_float);
+    fn tfly_learn_rate(handle: *mut TFlyHandle, v: c_float);
+    fn tfly_learn_rate_level(handle: *mut TFlyHandle) -> c_float;
     fn tfly_reset_learning(handle: *mut TFlyHandle);
     fn tfly_learning_gate(handle: *mut TFlyHandle) -> c_float;
     fn tfly_assoc_weight(handle: *mut TFlyHandle, cue: c_int, action: c_int) -> c_float;
@@ -412,6 +415,23 @@ pub mod drive {
     pub const COLD: i32 = 5;
     pub const SOCIAL: i32 = 6;
     pub const CURIOSITY: i32 = 7;
+    pub const COUNT: i32 = 8;
+
+    /// Russian names, index-for-index with the constants above.
+    ///
+    /// The core returns an ASCII key, which is right for code and unreadable
+    /// in a panel a person reads. This is a label, so it is allowed to be
+    /// reworded, and a test checks it against the core's own order.
+    pub const NAMES: [&str; 8] = [
+        "голод",
+        "жажда",
+        "влечение",
+        "сон",
+        "усталость",
+        "холод",
+        "общение",
+        "любопытство",
+    ];
 }
 
 /// Motor primitives, matching `T_ACT_*`.
@@ -616,6 +636,23 @@ impl Fly {
     pub fn plasticity(&mut self, v: f32) {
         unsafe { tfly_plasticity(self.ptr(), v) }
     }
+    /// Set a hormone's tonic level directly, bypassing the pulse system.
+    ///
+    /// This is for driving a state deliberately, as a test does when it needs
+    /// the modulator at an extreme the ordinary chemistry does not reach in a
+    /// short run. `hormone_level` is for reading, and `TEmit` is for the normal
+    /// route in.
+    pub fn set_hormone(&mut self, hormone: i32, v: f32) {
+        unsafe { tfly_set_hormone(self.ptr(), hormone, v) }
+    }
+    /// Learning rate as a multiple of the default, 0..20.
+    ///
+    /// This scales how large a permitted weight change is. It is not a fourth
+    /// factor of the three-factor rule: the modulator still gates every update
+    /// exactly as before, and a closed gate still teaches nothing at any rate.
+    pub fn set_learn_rate(&mut self, v: f32) {
+        unsafe { tfly_learn_rate(self.ptr(), v) }
+    }
     pub fn reset_learning(&mut self) {
         unsafe { tfly_reset_learning(self.ptr()) }
     }
@@ -700,6 +737,17 @@ impl Fly {
     pub fn dominant_emotion(&self) -> &'static str {
         cstr_to_name(unsafe { tfly_emotion_name(tfly_dominant_emotion(self.ptr())) })
     }
+    /// Index of the strongest emotion, so a caller can label it in Russian
+    /// rather than showing the core's ASCII key.
+    #[must_use]
+    pub fn dominant_emotion_id(&self) -> i32 {
+        unsafe { tfly_dominant_emotion(self.ptr()) }
+    }
+    /// Index of the strongest drive, for the same reason.
+    #[must_use]
+    pub fn dominant_drive_id(&self) -> i32 {
+        unsafe { tfly_dominant_drive(self.ptr()) }
+    }
     /// The C core's own key for an emotion, by index.
     ///
     /// This is the authority on the `T_EMO_*` order. The editor keeps a second
@@ -763,6 +811,11 @@ impl Fly {
     }
     pub fn plasticity_level(&self) -> f32 {
         unsafe { tfly_plasticity_level(self.ptr()) }
+    }
+    /// The learning rate currently in force, as a multiple of the default.
+    #[must_use]
+    pub fn learn_rate(&self) -> f32 {
+        unsafe { tfly_learn_rate_level(self.ptr()) }
     }
     /// Commanded thrust, i.e. what the motor actually produced this tick.
     pub fn out_thrust(&self) -> f32 {

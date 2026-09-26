@@ -92,6 +92,24 @@ h1 { font-size: 24px; } h2 { font-size: 17px; }
 .train-actions .button { flex: 1; padding: 7px 6px; font-size: 10px; }
 .epsilon-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 9px; color: var(--muted); font-size: 9px; }
 .epsilon-row input { flex: 1; }
+.epsilon-note { margin: 5px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; opacity: .8; }
+
+/* The association being trained, stated in words. It is the question the panel
+   exists to answer, so it is the largest type in the block. */
+.learn-what { display: flex; align-items: baseline; gap: 8px; margin-top: 8px; padding: 9px 10px; border: 1px solid rgba(84,215,232,.28); border-radius: 9px; background: rgba(84,215,232,.07); }
+.learn-what span { flex: 0 0 auto; color: var(--muted); font-size: 8px; letter-spacing: .12em; text-transform: uppercase; }
+.learn-what strong { font-size: 14px; color: #bff0f8; }
+
+/* A short line under a metric saying what the number is not. */
+.metric-note { display: block; margin-top: 4px; color: var(--muted); font-size: 8px; line-height: 1.35; opacity: .85; }
+
+/* The modulator, opened up. Folded away by default because it has more rows
+   than the eye wants to track, but it is the answer to "why is she not
+   learning", so it has to be one click away rather than absent. */
+.gate-why { margin-top: 9px; border: 1px solid var(--line); border-radius: 9px; background: rgba(9,14,24,.5); }
+.gate-why > summary { padding: 7px 9px; color: var(--muted); font-size: 9px; letter-spacing: .1em; text-transform: uppercase; cursor: pointer; }
+.gate-terms { padding: 0 9px 7px; color: #cfe3ef; font-size: 10px; line-height: 1.6; }
+.gate-note { margin: 0; padding: 0 9px 9px; color: var(--muted); font-size: 9px; line-height: 1.5; }
 
 /* ---- learning curve + event log ---- */
 .curve-block { margin-top: 11px; }

@@ -33,13 +33,19 @@
       <div class="readout"><div class="readout-head"><span>MODEL READOUT</span><span id="confidence">confidence 0%</span></div><strong id="drive">explore</strong><p id="decision">maintain_course</p><small id="attention">odor 50% · light 50% · touch 0%</small></div>
       <div class="training">
         <div class="readout-head"><span>ОБУЧЕНИЕ</span><span id="brain-level">ур. 1</span></div>
+        <div class="learn-what"><span>выучивает</span><strong id="brain-learning">— → —</strong></div>
         <div class="thought" id="brain-thought">муха ещё ничего не пробовала</div>
         <div class="brain-grid">
-          <div class="metric"><span>МАСТЕРСТВО</span><strong id="brain-mastery">0%</strong><div class="meter"><i id="brain-mastery-meter"></i></div></div>
-          <div class="metric"><span>ВЕС СВЯЗИ</span><strong id="brain-weight">0%</strong><div class="meter weight-meter"><i id="brain-weight-meter"></i></div></div>
+          <div class="metric"><span>ВЕС СВЯЗИ</span><strong id="brain-mastery">0%</strong><div class="meter weight-meter"><i id="brain-mastery-meter"></i></div><small class="metric-note" id="brain-left">осталось проб: —</small></div>
+          <div class="metric"><span>ВЕРНОСТЬ</span><strong id="brain-weight">0%</strong><div class="meter"><i id="brain-weight-meter"></i></div><small class="metric-note">угадывает, а не помнит</small></div>
           <div class="metric"><span>ГЕЙТ</span><strong id="brain-gate">0%</strong><div class="meter gate-meter"><i id="brain-gate-meter"></i></div></div>
           <div class="metric"><span>ПЛАСТИЧНОСТЬ</span><strong id="brain-plasticity">0%</strong><div class="meter"><i id="brain-plasticity-meter"></i></div></div>
         </div>
+        <details class="gate-why">
+          <summary>из чего сложен гейт</summary>
+          <div class="gate-terms" id="gate-terms"></div>
+          <p class="gate-note">Правило трёх факторов: меняется вес, только если действие было активно, пришёл исход и модулятор открыт. В пробе первые два есть всегда — закрыть можно только модулятор.</p>
+        </details>
         <div class="learning-strip"><span>проб <b id="brain-trials">0</b></span><span>верно <b id="brain-correct">0</b></span><span>xp <b id="brain-xp">0</b></span><span>память <b id="brain-memory">0</b></span></div>
         <div class="learning-strip"><span>настроение <b id="brain-mood">—</b></span><span>потребность <b id="brain-drive">—</b></span><span>последнее <b id="brain-outcome">—</b></span></div>
         <div class="train-actions">
@@ -52,6 +58,8 @@
           <button id="brain-unlearn" class="button">Забыть</button>
         </div>
         <label class="epsilon-row"><span>Любопытство (ε)</span><input id="epsilon" type="range" min="0" max="1" step="0.05" value="0.25"></label>
+        <label class="epsilon-row"><span>Темп обучения <b id="learnrate-value">x1.0</b></span><input id="learnrate" type="range" min="0.5" max="20" step="0.5" value="1"></label>
+        <p class="epsilon-note">Темп — это скорость обучения, а не четвёртый фактор: при закрытом гейте не учит ни x1, ни x20. На x1 урок берётся примерно за тысячу проб, и это честно.</p>
         <div class="gait-block">
           <div class="readout-head"><span>ПОХОДКА</span><span id="gait-balance">устойчивость 100%</span></div>
           <div class="gait-name"><b id="gait-preset">ровный</b><span id="gait-steps">0 шагов</span></div>

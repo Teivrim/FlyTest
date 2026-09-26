@@ -331,6 +331,12 @@ typedef struct {
     float elig[TFLY_N_ACTION];
     float cue_value[TFLY_N_CUE];
     float plasticity;
+    /* How big a permitted weight change is, as a multiple of the default. This
+     * is a learning rate, not a fourth factor: the modulator still gates the
+     * update identically, and a closed gate still teaches nothing whatever this
+     * is set to. It is exposed so the pace of a lesson can be watched at both
+     * ends, because the default is honest and slow. */
+    float learn_rate;
 
     /* working memory: [key, value] pairs, insertion ordered */
     float memory[TFLY_N_MEMORY][2];
@@ -512,6 +518,7 @@ static inline void TNew(TFLY *fly) {
     fly->lifespan = 1.0f;
     fly->temp_body = 0.5f;
     fly->plasticity = 1.0f;
+    fly->learn_rate = 1.0f;
     fly->emotion[T_EMO_CONTENTMENT] = 0.2f;
     fly->out_wingbeat = 0.0f;
     /* A newborn fly has a usable but untrained gait. */
@@ -816,6 +823,21 @@ static inline void TClearHormones(TFLY *fly) {
         fly->hormone_set[i] = 0.0f;
         fly->pulse[i] = 0.0f;
     }
+}
+
+/* Hold a hormone at a fixed level, bypassing the pulse system.
+ *
+ * This is for driving a state deliberately, as a test does when it needs the
+ * modulator at an extreme the ordinary chemistry does not reach in a short run.
+ * It is not how a fly is normally moved: TEmit is the normal route in, and it
+ * is what the editors use. */
+static inline void TSetHormone(TFLY *fly, int hormone, float level) {
+    if (fly == NULL) return;
+    int h = TClampIdx(hormone, TFLY_N_HORMONE);
+    float v = TClamp(level, 0.0f, 1.0f);
+    fly->hormone[h] = v;
+    fly->hormone_set[h] = v;
+    fly->pulse[h] = 0.0f;
 }
 
 /* ------------------------------------------------------------------ *
@@ -1229,7 +1251,7 @@ static inline void TAssociate(TFLY *fly, int cue, int action, float outcome, flo
     float m = TClamp(modulator, 0.0f, 2.0f);
     if (m <= 0.0f) return;
 
-    float lr = 0.02f * fly->plasticity;
+    float lr = 0.02f * fly->plasticity * fly->learn_rate;
     float delta = lr * fly->elig[a] * TClamp(outcome, -1.0f, 1.0f) * m;
     fly->assoc[c][a] = TClamp(fly->assoc[c][a] + delta, -1.0f, 1.0f);
     fly->cue_value[c] = TClamp(fly->cue_value[c] + 0.05f * TClamp(outcome, -1.0f, 1.0f) * m, -1.0f, 1.0f);
@@ -1276,6 +1298,16 @@ static inline void TPunish(TFLY *fly, float amount) {
 
 static inline void TPlasticity(TFLY *fly, float rate) {
     if (fly != NULL) fly->plasticity = TClamp(rate, 0.0f, 3.0f);
+}
+
+/* Learning rate as a multiple of the default. See the field for why this is
+ * not a fourth factor of the three-factor rule. */
+static inline void TLearnRate(TFLY *fly, float rate) {
+    if (fly != NULL) fly->learn_rate = TClamp(rate, 0.0f, 20.0f);
+}
+
+static inline float TLearnRateOf(const TFLY *fly) {
+    return fly != NULL ? fly->learn_rate : 0.0f;
 }
 
 /* ------------------------------------------------------------------ *
