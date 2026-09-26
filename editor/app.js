@@ -1639,7 +1639,11 @@ function renderLog(entries, path) {
   const list = $('log-list');
   const html = entries.slice().reverse().slice(0, 40).map((e) => {
     const stamp = `${Math.floor(e.t / 60)}:${String(Math.floor(e.t % 60)).padStart(2, '0')}`;
-    const who = e.fly ? `#${e.fly} ` : '';
+    // A line gets its author's id in front of it, because most of them are
+    // about one character. A line about two already opens with both ids, so
+    // printing the author's again reads as "#1 #1 и #2".
+    const opens = e.fly ? new RegExp(`^#${e.fly}\\b`).test(e.text) : false;
+    const who = e.fly && !opens ? `#${e.fly} ` : '';
     return `<li class="${escapeHtml(e.kind)}"><time>${stamp}</time><span>${who}${escapeHtml(e.text)}</span></li>`;
   }).join('');
   // Only rewrite when the content changed, so the list does not flicker.
