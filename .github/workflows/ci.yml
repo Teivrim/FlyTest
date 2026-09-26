@@ -41,9 +41,10 @@ jobs:
         shell: pwsh
         run: |
           $env:PATH = "C:\mingw64\bin;$env:PATH"
-          echo "C:\mingw64\bin" >> $env:GITHUB_PATH
-          echo "C:\mingw64\bin" >> $env:GITHUB_ENV
-          g++ --version | head -1
+          "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "C:\mingw64\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          # head -1 здесь не работает: это pwsh-шаг, а head из bash
+          (g++ --version)[0]
 
       # Готовые actions не берут хост в названии канала:
       # «target tuple in channel name 'stable-x86_64-pc-windows-gnu'».
