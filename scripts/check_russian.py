@@ -33,6 +33,7 @@ SCANNED = [
     "editor/style.css",
     "build.rs",
     "README.md",
+    "docs/technical-reference.md",
 ]
 
 # Real Russian words that must be present, as escape sequences so that this
@@ -60,8 +61,12 @@ EXPECTED = {
         "\u041e\u0421\u0410\u041d\u041a\u0410",  # OSANKA, posture
     ],
     "README.md": [
+        "\u0446\u0438\u0440\u043a",  # tsirk, circus
+    ],
+    "docs/technical-reference.md": [
         "\u043f\u043e\u0445\u043e\u0434\u043a\u0430",  # pohodka, gait
-        "\u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0438",  # personazhi, characters
+        "\u043f\u0435\u0440\u0441\u043e\u043d\u0430\u0436\u0438",  # personazhi
+        "\u0432\u0435\u0440\u043d\u043e\u0441\u0442\u044c",  # vernost, hit rate
     ],
 }
 
