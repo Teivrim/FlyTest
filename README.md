@@ -1,5 +1,7 @@
 # FlyTest
 
+
+[![CI](https://github.com/Teivrim/FlyTest/actions/workflows/ci.yml/badge.svg)](https://github.com/Teivrim/FlyTest/actions/workflows/ci.yml) [![license](https://img.shields.io/badge/license-MIT-5eead4.svg)](LICENSE) [![lines](https://img.shields.io/badge/lines-of%20code-lightgrey.svg)]()
 Локальный цифровой цирк для виртуальной мухи. Rust-runtime с сенсорным
 вводом и замкнутым контуром обучения, плюс `TFLY.h` — single-header
 C-библиотека со всей моделью: сенсоры, боль, гормоны, эмоции, потребности,
