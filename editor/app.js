@@ -1137,7 +1137,96 @@ function syncScene() {
     const positions = trail.geometry.attributes.position.array; for (let i = 0; i < 36; i++) { const point = history[Math.max(0, history.length - 36 + i)] || agent.position; positions[i * 3] = point[0]; positions[i * 3 + 1] = point[2] + 0.04; positions[i * 3 + 2] = point[1]; } trail.geometry.attributes.position.needsUpdate = true;
     const puffGroup = visual.userData.puffGroup; const puffLevel = agent.puff_level; puffGroup.visible = puffLevel > 0.02; if (puffGroup.visible) { const drift = 1 - puffLevel; puffGroup.scale.setScalar(0.55 + drift * 2.1); puffGroup.position.set(drift * 0.5, 0.1 + drift * 0.35, 0.4 + drift * 0.5); puffGroup.children.forEach((puff, puffIndex) => { puff.material.opacity = puffLevel * (0.55 - puffIndex * 0.12); puff.position.x = puffIndex * 0.09 * (1 + drift) + Math.sin(performance.now() * 0.005 + puffIndex) * 0.05; puff.position.z = puffIndex * 0.07 + drift * 0.3; }); }
   });
-  if (goalMarker && state.data.adventure) { const quest = state.data.adventure.id !== 'free_flight'; goalMarker.visible = quest; goalMarker.userData.ring.visible = quest; if (quest) { goalMarker.position.set(state.data.adventure.target[0], 0.32, state.data.adventure.target[1]); goalMarker.userData.ring.position.set(state.data.adventure.target[0], 0.06, state.data.adventure.target[1]); const pulse = 1 + Math.sin(performance.now() * 0.006) * 0.18; goalMarker.scale.setScalar(pulse); goalMarker.userData.ring.scale.setScalar(pulse); } }
+  drawCourse();
+}
+
+// The course: the maze, the food, and the breadcrumbs the characters leave.
+//
+// Rebuilt only when the maze changes, which the seed tells us. The walls are drawn
+// from the same segments the runtime collides against, so what is on screen is what
+// stops a character; redrawing them every frame would be sixty allocations a second
+// for a picture that does not change.
+let courseBuilt = null;
+let courseGroup = null;
+let foodMarker = null;
+const courseTrails = new Map();
+
+function drawCourse() {
+  const course = state.data.course;
+  const stage = currentStage();
+  if (!course || !stage) { if (courseGroup) courseGroup.visible = false; if (foodMarker) foodMarker.visible = false; return; }
+  const [ox, oz] = stage.origin;
+  const key = `${course.seed}:${stage.id}`;
+
+  if (courseBuilt !== key) {
+    courseBuilt = key;
+    if (!courseGroup) { courseGroup = new THREE.Group(); scene.add(courseGroup); }
+    while (courseGroup.children.length) {
+      const child = courseGroup.children.pop();
+      child.geometry?.dispose();
+      child.material?.dispose();
+    }
+    const height = stage.stage_height ?? 0.17;
+    for (const wall of course.walls) {
+      const slab = new THREE.Mesh(
+        new THREE.BoxGeometry(wall.half_len * 2, height * 0.62, wall.half_thick * 2),
+        material('#243349', stage.color, 0.4)
+      );
+      slab.position.set(ox + wall.x, height * 0.31, oz + wall.z);
+      slab.rotation.y = -wall.angle;
+      slab.castShadow = true;
+      slab.receiveShadow = true;
+      courseGroup.add(slab);
+    }
+    // The food, and a ring under it so it reads from across the tent.
+    if (!foodMarker) {
+      foodMarker = new THREE.Group();
+      const crumb = new THREE.Mesh(new THREE.SphereGeometry(0.075, 14, 10), new THREE.MeshBasicMaterial({ color: '#ffd36b' }));
+      crumb.position.y = 0.1;
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.016, 6, 26), new THREE.MeshBasicMaterial({ color: '#ffd36b', transparent: true, opacity: 0.8 }));
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 0.02;
+      foodMarker.add(crumb, ring);
+      foodMarker.userData.ring = ring;
+      scene.add(foodMarker);
+    }
+    for (const trail of courseTrails.values()) { trail.geometry.dispose(); trail.material.dispose(); }
+    courseTrails.clear();
+  }
+
+  courseGroup.visible = true;
+  const eaten = course.fed >= course.count && course.count > 0;
+  foodMarker.visible = !eaten;
+  if (!eaten) {
+    foodMarker.position.set(ox + course.food[0], (stage.stage_height ?? 0.17) + 0.02, oz + course.food[1]);
+    const pulse = 1 + Math.sin(performance.now() * 0.005) * 0.16;
+    foodMarker.scale.setScalar(pulse);
+  }
+  // One line per character, in their own colour, so the first one through is
+  // visibly the one the others are following.
+  for (const runner of course.runners) {
+    let line = courseTrails.get(runner.id);
+    if (!line) {
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
+      const colour = (state.data.agents.find((a) => a.id === runner.id) || {}).color || '#8fd3ff';
+      line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: colour, transparent: true, opacity: 0.7 }));
+      line.frustumCulled = false;
+      scene.add(line);
+      courseTrails.set(runner.id, line);
+    }
+    const points = runner.trail;
+    const array = line.geometry.attributes.position.array;
+    const count = Math.min(points.length, 64);
+    for (let i = 0; i < 64; i++) {
+      const point = points[Math.max(0, count - 64 + i)] || points[count - 1] || [0, 0];
+      array[i * 3] = ox + point[0];
+      array[i * 3 + 1] = (stage.stage_height ?? 0.17) + 0.03;
+      array[i * 3 + 2] = oz + point[1];
+    }
+    line.geometry.attributes.position.needsUpdate = true;
+    line.material.opacity = runner.fed ? 0.95 : 0.45;
+  }
 }
 
 async function command(action, payload = {}) { await fetch('/api/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...payload }) }); await refresh(); }
@@ -1160,7 +1249,14 @@ function renderPanels() {
   const agent = data.agents.find((item) => item.id === state.selected) || data.agents[0]; if (!agent) return;
   $('selected-name').textContent = agent.name; $('selected-channel').textContent = agent.channel; $('input-value').textContent = agent.input_level.toFixed(2); $('reaction-value').textContent = agent.reaction_level.toFixed(2); $('nt-value').textContent = agent.neurotransmitter; $('energy-value').textContent = agent.energy.toFixed(2); $('input-meter').style.width = `${agent.input_level * 100}%`; $('reaction-meter').style.width = `${agent.reaction_level * 100}%`; $('hormone-meter').style.width = `${agent.hormone_level * 100}%`; $('energy-meter').style.width = `${agent.energy * 100}%`; $('speed').value = data.speed; $('speed-value').textContent = `${data.speed.toFixed(2)}×`; $('decay').value = data.decay; $('decay-value').textContent = data.decay.toFixed(2); $('hormone-toggle').textContent = agent.hormone_enabled ? 'ON' : 'OFF'; $('signal-bar').style.width = `${agent.input_level * 100}%`; $('reaction-bar').style.width = `${agent.reaction_level * 100}%`; $('hormone-bar').style.width = `${agent.hormone_level * 100}%`;
   $('drive').textContent = `${intentLabel(agent.drive)} · ${agent.drive}`; $('decision').textContent = intentLabel(agent.decision); $('attention').textContent = agent.attention; $('confidence').textContent = `confidence ${Math.round(agent.confidence * 100)}%`;
-  $('adventure-name').textContent = data.adventure.name; $('adventure-objective').textContent = data.adventure.objective; $('adventure-score').textContent = `score ${data.adventure.score}`; $('adventure-progress').value = data.adventure.progress; $('adventure-select').value = data.adventure.id;
+  const course = data.course;
+  $('course-round').textContent = `раунд ${course.round}`;
+  $('course-goal').textContent = course.count
+    ? `дошли до еды: ${course.fed} из ${course.count}`
+    : 'дойти до еды в конце лабиринта';
+  $('course-count').textContent = `${course.fed} / ${course.count}`;
+  $('course-time').value = Math.max(0, Math.min(1, course.time_left / (course.round_length || 1)));
+  $('course-seed').textContent = `лабиринт seed ${course.seed} · длина хода ${course.path_length.toFixed(1)}`;
   $('strategy-value').textContent = agent.strategy; $('reward-value').textContent = `${Math.round(agent.reward * 100)}%`; $('novelty-value').textContent = `${Math.round(agent.novelty * 100)}%`; $('puff-value').textContent = `${agent.puff_count} (${data.metrics.total_puff_events})`; $('learning-value').textContent = String(data.metrics.learning_updates);
   renderActs(data);
   renderBrain(data);
@@ -1692,7 +1788,7 @@ function render3D() {
   requestAnimationFrame(render3D);
 }
 $('pause').addEventListener('click', () => command(state.data && state.data.running ? 'pause' : 'resume')); $('reset').addEventListener('click', () => command('reset')); $('add-fly').addEventListener('click', () => command('add')); $('speed').addEventListener('input', (event) => command('speed', { value: Number(event.target.value) })); $('decay').addEventListener('input', (event) => command('decay', { value: Number(event.target.value) })); $('hormone-toggle').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('hormone', { id: agent.id, enabled: !agent.hormone_enabled }); }); $('open-bridge').addEventListener('click', () => window.alert('Для полной 3D-сцены запусти: scripts/run_demo.ps1 -WithBlender'));
-$('adventure-select').addEventListener('change', (event) => command('adventure', { name: event.target.value }));
+$('course-button').addEventListener('click', () => command('course'));
 
 // Training controls operate on the selected fly.
 $('train-burst').addEventListener('click', () => command('train', { value: 200 }));

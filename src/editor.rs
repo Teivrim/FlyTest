@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::course::Course;
 use crate::tfly::{self, action, cue};
 
 pub const DEFAULT_PORT: u16 = 8765;
@@ -207,14 +208,67 @@ pub struct EditorMetrics {
     pub fixed_timestep_ms: f32,
 }
 
+/// One wall of the course, as the client draws it.
+///
+/// The stage's own posts are circles and are not listed here: the client already
+/// draws them from the act's colliders. These are the maze, and they are sent in
+/// stage-local coordinates so they move with the stage the way the disc does.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct WallSnapshot {
+    pub x: f32,
+    pub z: f32,
+    pub half_len: f32,
+    pub half_thick: f32,
+    pub angle: f32,
+}
+
+/// What a character is doing on the course right now.
 #[derive(Debug, Clone, Serialize)]
-pub struct AdventureSnapshot {
-    pub id: String,
-    pub name: String,
-    pub objective: String,
+pub struct RunnerSnapshot {
+    pub id: u32,
+    /// She has reached the food this round.
+    pub fed: bool,
+    /// How far she is from the food, in stage-local units.
+    pub distance: f32,
+    /// How much of the way she has come along the route, 0..1. Straight-line
+    /// distance is the honest measure; she does not know the route, so the panel
+    /// does not pretend she is following one.
     pub progress: f32,
+    /// Rounds she has finished.
     pub score: u32,
-    pub target: [f32; 2],
+    /// Where she has been this round, stage-local, for drawing and for the others
+    /// to follow.
+    pub trail: Vec<[f32; 2]>,
+}
+
+/// The course, as the client needs it.
+#[derive(Debug, Clone, Serialize)]
+pub struct CourseSnapshot {
+    /// Which round this is, counted from one.
+    pub round: u32,
+    /// The seed the maze was built from, so a round can be repeated.
+    pub seed: u32,
+    /// Seconds left before the course is rebuilt under them.
+    pub time_left: f32,
+    /// Seconds a round lasts.
+    pub round_length: f32,
+    /// The food, stage-local.
+    pub food: [f32; 2],
+    /// Side of one maze cell, so the client can size its own marks to the course
+    /// instead of guessing.
+    pub cell: f32,
+    /// Where the characters start, stage-local.
+    pub start: [f32; 2],
+    /// Length of the way through, for scoring.
+    pub path_length: f32,
+    /// The maze.
+    pub walls: Vec<WallSnapshot>,
+    /// Every character on this course.
+    pub runners: Vec<RunnerSnapshot>,
+    /// How many have eaten.
+    pub fed: u32,
+    /// How many there are.
+    pub count: u32,
 }
 
 /// One notable thing that happened, kept so progress is auditable after the
@@ -411,7 +465,7 @@ pub struct EditorSnapshot {
     pub decay: f32,
     pub selected_fly: Option<u32>,
     pub agents: Vec<AgentSnapshot>,
-    pub adventure: AdventureSnapshot,
+    pub course: CourseSnapshot,
     pub acts: Vec<ActSnapshot>,
     pub training: TrainingSnapshot,
     pub brain: Option<BrainSnapshot>,
@@ -480,7 +534,266 @@ struct Agent {
     /// The largest circle she can mill around on this stage without touching
     /// its scenery. Set from the act, so a cramped stage cramps her.
     orbit_room: f32,
+
+    // ---- the course ----
+    //
+    // She has a job now. The act's stage used to be the whole of her purpose and
+    // the "adventure" was a point drifting around it, so the most she ever did was
+    // walk to the middle of a disc. The course gives her somewhere to be and a
+    // reason to walk there, and the three fields below are how she finds it.
+    /// Where she is heading, in arena coordinates. The runtime sets this each
+    /// tick from what she can smell and what the others have left behind.
+    nav: [f32; 2],
+    /// How much of her attention the course takes from milling about, 0..1.
+    /// At zero she orbits her act exactly as she always did, which is what the
+    /// acts that are not running a course get.
+    nav_weight: f32,
+    /// Whether `nav` is a place she has remembered, rather than a direction she is
+    /// feeling her way along.
+    ///
+    /// The two are not mixed. A remembered place is one cell away and she walks at
+    /// it; a direction she is feeling for is the whole wall-following rule, and
+    /// applying both at once has her hugging a wall while trying to reach the room
+    /// behind her, which is a reliable way to reach no room at all.
+    nav_is_place: bool,
+    /// A quarter turn to add to her heading, and how long it lasts.
+    ///
+    /// This is the whole of her wall handling. Without it she walks into a dead
+    /// end and stays there, because the food smells the same from every side of
+    /// the wall between them. With it she comes back along the wall and tries
+    /// the next opening, which is what an insect does and what makes the round
+    /// look like a search rather than a queue.
+    wall_turn: f32,
+    wall_timer: f32,
+    /// Whether she has reached the food this round.
+    fed: bool,
+    /// The stage she is on, as centre x, centre z and radius.
+    ///
+    /// The rim is a real boundary and it belongs with the collision rather than
+    /// with a clamp outside it. Without it, being pushed out of a maze wall near
+    /// the edge of the stage pushes her off the stage, and a character standing
+    /// on the tent floor is a different character from one standing on a disc.
+    stage: [f32; 3],
+    /// How long she has been going nowhere, in seconds.
+    ///
+    /// Measured from her own displacement, not from whether she wants to move: a
+    /// character can want a door very much and still not get through it, and only
+    /// the displacement says which of the two is happening.
+    stuck: f32,
+    /// Which way she last tried to get herself out of a wedge, so that the next
+    /// try is a different one.
+    stuck_way: f32,
+    /// The direction she is walking, kept across ticks.
+    ///
+    /// The course has to be searched rather than solved, and searching needs a
+    /// sense of which way she is facing. Taking it from her velocity alone is not
+    /// enough: she is eased toward her heading, so velocity is near zero for a
+    /// moment after every turn and the rule below would read that as "no way
+    /// open at all".
+    facing: [f32; 2],
+    /// Where she has been this round, in arena coordinates, newest last.
+    ///
+    /// This is the only thing she teaches the others. A character that has eaten
+    /// leaves a path, and a character that has not will follow it, which is
+    /// learning from another one without anything being transferred but a
+    /// direction.
+    trail: std::collections::VecDeque<[f32; 2]>,
+    /// What she remembers about the course, or nothing if she is not on one.
+    search: Option<Search>,
 }
+
+/// What a character remembers about where she has been on this course.
+///
+/// This is the difference between a character that searches a maze and one that
+/// is stuck in it. Feeling her way along the walls works until she meets a dead
+/// end, and then it works her in circles: the way back smells exactly like the way
+/// on, and nothing in the walls tells the two apart. So she writes down the road
+/// she took, and writes a place off once every way out of it has been tried.
+///
+/// The passages themselves are *not* given to her. What connects to what is
+/// learned by walking, one step at a time, from the cell she was standing in to
+/// the cell she reached. She is given the names of the places and nothing about
+/// what lies between them, which is very much less than a map.
+#[derive(Debug, Clone)]
+struct Search {
+    /// The road she took to get here, entrance first. The last entry is where she
+    /// is standing.
+    stack: Vec<usize>,
+    /// Set for a place she has stood in and walked out of.
+    ///
+    /// Not the same as "finished". A place can be stood in, left, and still have
+    /// somewhere new, and the difference is the whole search: without this she
+    /// treats the doorway she came through as somewhere to try, walks back into
+    /// the room she just left, and shuttles between two cells for the whole round.
+    seen: Vec<bool>,
+    /// Set for a place whose every way out leads to a finished branch.
+    ///
+    /// Deliberately not the same as being new to it. A place she has not left yet
+    /// is unexplored, and writing that off is what makes a character mark every
+    /// cell she has not yet walked out of as a dead end, learn nothing, and stand
+    /// still.
+    dead: Vec<bool>,
+    /// The passages she has found, both ways round, by walking them.
+    links: Vec<Vec<usize>>,
+    /// The cell she has set off for, which she does not change her mind about
+    /// until she is standing in it.
+    ///
+    /// Without this she changes her mind sixty times a second in a doorway. The
+    /// boundary between two cells runs through the middle of the opening between
+    /// them, so standing in the opening names one cell and then the other and then
+    /// the first, and a character deciding afresh each tick turns round in the
+    /// threshold and never goes through. Deciding once and then walking it is what
+    /// a decision is.
+    committing: Option<usize>,
+}
+
+impl Search {
+    /// She is handed the passages and nothing else. The road, what has been tried
+    /// and what she is on her way to are all hers.
+    fn new(passages: &[Vec<usize>]) -> Self {
+        Self {
+            stack: Vec::with_capacity(8),
+            seen: vec![false; passages.len()],
+            dead: vec![false; passages.len()],
+            links: passages.to_vec(),
+            committing: None,
+        }
+    }
+
+    /// Note that she has got to a cell, keeping the road she took to it.
+    ///
+    /// Retracing trims the road back to the place she has just come from, so the
+    /// road is always the part of the maze she has not finished. A place she has
+    /// never stood in is simply added.
+    fn arrive(&mut self, cell: usize) {
+        if self.stack.last() == Some(&cell) {
+            return;
+        }
+        if let Some(at) = self.stack.iter().rposition(|c| *c == cell) {
+            self.stack.truncate(at + 1);
+        } else {
+            self.stack.push(cell);
+        }
+    }
+
+    /// The cell to make for next, or nothing while she is still getting her
+    /// bearings or has arrived.
+    ///
+    /// Nowhere she has never stood, if there is one. Failing that, the place she
+    /// came from, so she walks back to it; arriving there trims the road and the
+    /// next call carries on from there. On a carved maze that is a tree, so this
+    /// reaches every part of it, and it stops at the food.
+    ///
+    /// The retreat is a place to walk to, not a place she has been moved to. It
+    /// used to pop the road here instead, which is a searcher deciding that she
+    /// is somewhere she is not: she stood in one corner of the maze while her own
+    /// record said she was three rooms away, so the next thing it wanted her to do
+    /// was walk through a wall, and she did not move for the rest of the round.
+    fn next(&mut self, food: usize) -> Option<usize> {
+        // A decision already made stands until she has physically got there, or
+        // until the place she was going turns out to be finished with. Deciding
+        // from the road alone does not work: the boundary between two cells runs
+        // through the middle of the doorway between them, so she is named in one
+        // cell and then the other and then the first, and a character that
+        // re-decides on every tick turns round in the threshold and never goes
+        // through.
+        if let Some(going) = self.committing
+            && !self.dead[going]
+        {
+            return Some(going);
+        }
+        self.committing = None;
+        let here = *self.stack.last()?;
+        if here == food {
+            return None;
+        }
+        // Somewhere she has never stood. Tried on its own: the doorway behind her
+        // is a way out but not a way *on*, and offering it as one is what turns a
+        // search into a shuffle between two cells.
+        if let Some(next) = self
+            .links
+            .get(here)
+            .and_then(|out| out.iter().copied().find(|c| !self.seen[*c]))
+        {
+            self.seen[here] = true;
+            self.committing = Some(next);
+            return Some(next);
+        }
+        // Nothing new from here, so this branch is finished. She walks back to
+        // where she came from; the road is trimmed when she gets there.
+        self.seen[here] = true;
+        self.dead[here] = true;
+        let at = self.stack.iter().rposition(|c| *c != here)?;
+        Some(self.stack[at])
+    }
+}
+
+/// How far apart two trail points have to be before the next one is kept.
+///
+/// The trail is a breadcrumb for the renderer and a lure for the other
+/// characters, and neither needs a point every centimetre. Thin enough to be
+/// cheap, thick enough to read as a path.
+pub const TRAIL_STEP: f32 = 0.09;
+
+/// How long a character keeps to a wall after bumping into one.
+pub const WALL_COMMITMENT: f32 = 0.55;
+
+/// How deep into a wall she has to be before it counts as being stuck.
+///
+/// A graze is not a jam. In a corridor she touches both sides continuously, and
+/// treating that as being stuck turns her quarter every few frames, which sends
+/// her round in circles instead of through the maze.
+pub const JAMMED: f32 = 0.055;
+
+/// How close to the food counts as reaching it.
+///
+/// A little over a body width, so she has to come to it rather than brush past.
+pub const FOOD_REACH: f32 = BODY_RADIUS + 0.09;
+
+/// How long she may go nowhere before she tries a different angle, in seconds.
+pub const STUCK_AFTER: f32 = 0.6;
+
+/// Less ground than this in one tick counts as going nowhere.
+///
+/// A twentieth of her body width. She walks about a hundredth of a unit a tick when
+/// she is moving, so this only catches her when she is not.
+pub const STUCK_STEP: f32 = 0.0015;
+
+/// How far off her intended line she tries when wedged, in radians.
+///
+/// Enough to miss the corner that is catching her and little enough that she is
+/// still going roughly where she meant to.
+pub const DEFLECT: f32 = 0.85;
+
+/// How far ahead she feels for a wall, in world units.
+///
+/// One stride, and it has to be shorter than the room she has to move sideways,
+/// which is what lets her turn. A longer probe asks "could I walk half a metre
+/// that way", and in a passage the honest answer sideways is no, so she finds no
+/// way open at all and stands still. A stride asks "can I take the next step that
+/// way", which is the decision she is actually making.
+///
+/// It does not need to be longer than her keep-out from a wall, because the sense
+/// is measured against the wall *plus a body width*: a wall across the passage is
+/// felt a whole body before she is against it, which is what lets her turn in time
+/// instead of walking the length of a corridor and overshooting the junction.
+pub const PROBE: f32 = 0.15;
+
+/// How much slack the sense allows beyond her own width.
+pub const PROBE_MARGIN: f32 = 0.02;
+
+/// The longest a gait trial may move her in one go, in world units.
+///
+/// Short enough that she cannot clear a corridor in a single step. The collision
+/// resolves what she is standing inside, so the move has to be small enough that
+/// she is never more than a step past a wall before it is checked.
+pub const ADVANCE_SLICE: f32 = 0.12;
+
+/// How many points a character's trail keeps.
+///
+/// Long enough to show the way back along a stage, short enough that it stays a
+/// handful of points per character in the snapshot.
+pub const TRAIL_MAX: usize = 48;
 
 impl Agent {
     fn new(id: u32, index: usize) -> Self {
@@ -536,6 +849,21 @@ impl Agent {
             // first step, so it is never actually used as empty.
             solids: Vec::new(),
             orbit_room: 0.0,
+            nav: [0.0, 0.0],
+            nav_weight: 0.0,
+            nav_is_place: false,
+            // Every character turns the same way round a wall, which is what
+            // makes a troupe traverse a maze instead of milling in it. The sign
+            // comes from her id so two characters do not cancel out.
+            wall_turn: if id.is_multiple_of(2) { 1.0 } else { -1.0 },
+            wall_timer: 0.0,
+            fed: false,
+            stage: [0.0, 0.0, 0.0],
+            stuck: 0.0,
+            stuck_way: 1.0,
+            facing: [0.0, 0.0],
+            trail: std::collections::VecDeque::new(),
+            search: None,
         }
     }
 
@@ -576,8 +904,25 @@ impl Agent {
     /// her into another where they nearly touch. The correction is purely
     /// positional: where she ends up is decided by the steering, and this only
     /// refuses to leave her standing inside a wall.
-    fn slide_out_of_solids(&mut self) {
-        for _ in 0..2 {
+    ///
+    /// Returns whether she was actually inside something, which is the steering's
+    /// cue to go round it instead of into it. Without that cue a character walks
+    /// into a dead end and stays there: the food smells the same from both sides
+    /// of the wall, so nothing in the attraction tells her to turn.
+    fn slide_out_of_solids(&mut self) -> f32 {
+        let mut worst = 0.0f32;
+        for _ in 0..3 {
+            // Every overlap is collected and the total is applied in one go, rather
+            // than resolving one wall at a time.
+            //
+            // Where two walls meet, resolving them in turn is a pendulum: pushed off
+            // one, straight into the other, back again, and she is wedged in the
+            // corner until something else walks into her and shakes her loose. A
+            // character on her own has nobody to do that, so she stood in the
+            // first corner of every maze for the whole round. Added together the
+            // two pushes point out along the diagonal, which is the way out.
+            let mut push_x = 0.0f32;
+            let mut push_y = 0.0f32;
             for solid in &self.solids {
                 let (sx, sz, r) = (solid[0], solid[1], solid[2]);
                 if r <= 0.0 {
@@ -590,12 +935,189 @@ impl Agent {
                 if (nd >= wanted) || (nd < 1e-4) {
                     continue;
                 }
-                self.position[0] = sx + (nx / nd) * wanted;
-                self.position[1] = sz + (ny / nd) * wanted;
+                let depth = wanted - nd;
+                push_x += (nx / nd) * depth;
+                push_y += (ny / nd) * depth;
+                worst = worst.max(depth);
+            }
+            self.position[0] += push_x;
+            self.position[1] += push_y;
+            // And she stops pushing. The steering is recomputed from scratch every
+            // tick, so the velocity still carries the whole of the shove that got
+            // her into this wall, and she walks into it again at the same speed
+            // until she is stopped dead by it. Taking the component of her
+            // velocity that goes into the wall off is what makes her slide along
+            // the wall and round it, which is the difference between a character
+            // negotiating a maze and a character leaning on one.
+            let push = (push_x * push_x + push_y * push_y).sqrt();
+            if push > 1e-6 {
+                let (ux, uy) = (push_x / push, push_y / push);
+                let into = self.velocity[0] * ux + self.velocity[1] * uy;
+                if into < 0.0 {
+                    self.velocity[0] -= ux * into;
+                    self.velocity[1] -= uy * into;
+                }
+            }
+            // Then the rim. A wall near the edge of the stage pushes her out to
+            // `wall + body`, which for a wall at the edge is past the stage, so
+            // without this she steps off the disc and is standing on the floor.
+            let (cx, cz, radius) = (self.stage[0], self.stage[1], self.stage[2]);
+            if radius > 0.0 {
+                let limit = radius - BODY_RADIUS;
+                let dx = self.position[0] - cx;
+                let dz = self.position[1] - cz;
+                let d = (dx * dx + dz * dz).sqrt();
+                if d > limit && d > 1e-4 {
+                    self.position[0] = cx + (dx / d) * limit;
+                    self.position[1] = cz + (dz / d) * limit;
+                    worst = worst.max(d - limit);
+                }
+            }
+            if worst <= 0.0 {
+                break;
             }
         }
+        worst
     }
 
+    /// Is the way clear a short way off in this direction?
+    ///
+    /// This is her only sense of the walls. There is no map and no plan: she asks
+    /// whether she herself fits a stride that way, in each of four directions, and
+    /// that is enough to walk a maze.
+    ///
+    /// The test is against the wall *plus a body width*, not against the wall. A
+    /// point fits through gaps a person does not, so asking "is that spot clear"
+    /// tells her a corridor is open when she is too wide for it, and she walks into
+    /// a wall she had already decided was not there.
+    fn way_open(&self, dx: f32, dy: f32) -> bool {
+        // The stage rim counts as a wall, or she would happily walk off the disc
+        // following it.
+        let (cx, cz, radius) = (self.stage[0], self.stage[1], self.stage[2]);
+        let reach = BODY_RADIUS + PROBE_MARGIN;
+        let clear = |px: f32, py: f32| {
+            if radius > 0.0 && (px - cx).hypot(py - cz) > radius - BODY_RADIUS {
+                return false;
+            }
+            !self.solids.iter().any(|solid| {
+                solid[2] > 0.0 && (px - solid[0]).hypot(py - solid[1]) < solid[2] + reach
+            })
+        };
+        // One stride, and it is short on purpose. A long probe asks "could I walk
+        // half a metre that way", and in a passage the honest answer sideways is
+        // no — which is right, and useless, because turning *is* a sideways
+        // moment. She then finds no way open at all and stands still. A stride
+        // asks "can I take the next step that way", which is what she is actually
+        // deciding, and the body width it is measured against means a wall across
+        // the passage is felt a whole body before she is against it.
+        clear(self.position[0] + dx * PROBE, self.position[1] + dy * PROBE)
+    }
+
+    /// Which way to go next, searching.
+    ///
+    /// Wall following, which is how an insect does it and what actually works
+    /// here. The smell of the food is her initial heading and nothing more: on
+    /// its own it walks her into the first dead end and she stays there, because
+    /// the food smells the same from both sides of the wall between them.
+    ///
+    /// The priority is fixed: turn towards the wall you are keeping, then go on,
+    /// then turn the other way, then turn about. A carved maze is a tree, so a
+    /// character that keeps to a wall this way comes to every part of it. Letting
+    /// the smell choose between the open ways instead looks more purposeful and
+    /// does not work at all: she dithers on the spot, because the smell points back
+    /// the way she came.
+    ///
+    /// Which hand she keeps is hers, so a troupe does not all file through the
+    /// same corridor in the same order.
+    /// Which way to go next, searching.
+    ///
+    /// Wall following, which is how an insect does it and what actually works
+    /// here. The smell of the food is her initial heading and nothing more: on
+    /// its own it walks her into the first dead end and she stays there, because
+    /// the food smells the same from both sides of the wall between them.
+    ///
+    /// The order is the whole algorithm: carry on if the way is clear, otherwise
+    /// turn towards the wall she is keeping, as far as she has to. A carved maze
+    /// is a tree, so a character that keeps to a wall this way comes to every part
+    /// of it. Which hand she keeps is hers, so a troupe does not all file through
+    /// the same corridor in the same order.
+    ///
+    /// Eight directions, not four. With only four she can be boxed in: facing a
+    /// diagonal, all four of straight, left, right and about are walls while the
+    /// way on is open, and there is no move in the set for her to make. She then
+    /// turns about every tick, which is what a character in a dead end used to do
+    /// for a whole round.
+    fn search_heading(&mut self, to_goal: [f32; 2]) -> [f32; 2] {
+        // Her facing is whatever the rule last chose, and nothing else.
+        //
+        // It is tempting to read it off her velocity, and that is what this did at
+        // first, and it does not work: being pushed off a wall puts a sideways
+        // component into the velocity, the rule reads that as her heading, turns
+        // her, the turn pushes her into the other wall, and she spends the round
+        // vibrating between two directions and going nowhere. The heading is a
+        // decision, and a decision does not come from what the body did last tick.
+        //
+        // Before she has chosen anything she heads for the food, which is the one
+        // time the smell is allowed to decide.
+        if self.facing[0].abs() + self.facing[1].abs() < 1e-4 {
+            let gx = to_goal[0] - self.position[0];
+            let gy = to_goal[1] - self.position[1];
+            let d = gx.hypot(gy);
+            if d < 1e-4 {
+                return [0.0, 0.0];
+            }
+            self.facing = [gx / d, gy / d];
+        }
+        let (fx, fy) = (self.facing[0], self.facing[1]);
+        let hand = if self.wall_turn >= 0.0 {
+            1.0f32
+        } else {
+            -1.0f32
+        };
+        // The order is the rule, and the order matters more than the set.
+        //
+        // Squarely towards the wall she keeps comes *before* straight on.
+        // Preferring to go straight lets her leave the wall at every junction, and
+        // a character that has lost her wall is not following anything: she crosses
+        // the middle of the maze, comes back, and crosses it again, which is what
+        // she did for as long as this preferred straight. With the wall kept
+        // first, a carved maze being a tree means she comes to every part of it.
+        //
+        // Eight headings, 45 degrees apart, because with four she can be boxed in:
+        // facing a diagonal, straight, both sides and about are all walls while the
+        // way on is open, and there is no move in the set for her to make.
+        let steps = [2.0f32, 1.0, 0.0, -1.0, -2.0, -3.0, 4.0, 3.0];
+        // While she is wedged she starts further round, skipping the turns she has
+        // just failed to make. A corner her feeling calls open but her shoulders
+        // do not fit through is the one thing the feeling cannot see, and without
+        // this she commits to it, is pushed back, commits again, and works the
+        // corner for the rest of the round instead of going round it.
+        let skip = usize::from(self.wall_timer > 0.0) * 2;
+        self.wall_timer = 0.0;
+        for (index, step) in steps.into_iter().enumerate() {
+            if index < skip {
+                continue;
+            }
+            let angle = hand * step * std::f32::consts::FRAC_PI_4;
+            let (sin, cos) = angle.sin_cos();
+            let candidate = [fx * cos - fy * sin, fx * sin + fy * cos];
+            if self.way_open(candidate[0], candidate[1]) {
+                self.facing = candidate;
+                return candidate;
+            }
+        }
+        // Boxed in on every side, which the disc-cut maze should not allow. Hold
+        // the heading rather than spinning.
+        [fx, fy]
+    }
+
+    /// Move her forward along her heading, for a gait trial.
+    ///
+    /// Moved in slices rather than in one jump. The distance is measured so the
+    /// brain can be scored on how far it got, but a single jump of half a unit
+    /// clears a wall in one go: the collision only pushes her out of whatever she
+    /// landed inside, and by then she is on the far side, where nothing pushes
+    /// her back. A maze walked that way is a maze she is not in.
     fn advance(&mut self, steps: u32, dt: f32) {
         let speed = 0.6 + 0.5 * self.gait_cadence;
         let distance = speed * dt * steps as f32;
@@ -604,15 +1126,21 @@ impl Agent {
         } else {
             1.0
         };
-        self.position[0] += (self.velocity[0] / heading) * distance;
-        self.position[1] += (self.velocity[1] / heading) * distance;
-        self.slide_out_of_solids();
+        let (ux, uy) = (self.velocity[0] / heading, self.velocity[1] / heading);
+        let slices = ((distance / ADVANCE_SLICE).ceil() as usize).max(1);
+        let slice = distance / slices as f32;
+        for _ in 0..slices {
+            self.position[0] += ux * slice;
+            self.position[1] += uy * slice;
+            self.slide_out_of_solids();
+        }
         for (axis, limit) in [(0, 9.2), (1, 9.2)] {
             self.position[axis] = self.position[axis].clamp(-limit, limit);
         }
     }
 
     fn step(&mut self, time: f32, dt: f32, speed: f32, decay: f32) {
+        let from = self.position;
         let phase = time * 0.9 + self.id as f32 * 1.31;
         self.light = (0.5 + 0.35 * (time * 0.7).sin()).clamp(0.0, 1.0);
         self.odor = (0.5 + 0.3 * (time * 0.43 + self.id as f32 * 0.17).sin()).clamp(0.0, 1.0);
@@ -643,12 +1171,71 @@ impl Agent {
         let orbit_a = time * 0.5 + self.id as f32 * 2.1;
         let goal_x = self.anchor[0] + orbit_r * orbit_a.cos();
         let goal_y = self.anchor[1] + orbit_r * orbit_a.sin();
-        let desired_x = (goal_x - self.position[0]) * 0.9
-            + (self.odor - 0.5) * 0.35
-            + (time * 0.35 + self.id as f32).sin() * 0.2;
-        let desired_y = (goal_y - self.position[1]) * 0.9
-            + (self.light - 0.5) * 0.25
-            + (time * 0.27 + self.id as f32 * 1.7).cos() * 0.15;
+        // On a course the goal is somewhere she has to find, not a circle she
+        // drifts around. Blending the two by `nav_weight` keeps one steering
+        // path for both, so the acts that are not running a course behave exactly
+        // as they did.
+        let seek_x = goal_x * (1.0 - self.nav_weight) + self.nav[0] * self.nav_weight;
+        let seek_y = goal_y * (1.0 - self.nav_weight) + self.nav[1] * self.nav_weight;
+        // The wall commitment turns her heading a quarter turn while it lasts.
+        // Applied to the direction she is trying to go, not to the world, so it
+        // is "carry on past this wall" rather than "go that way now".
+        let to_seek_x = seek_x - self.position[0];
+        let to_seek_y = seek_y - self.position[1];
+        let (mut aimed_x, mut aimed_y) = (to_seek_x, to_seek_y);
+        // On a course with nothing remembered she feels her way along the walls.
+        // With a place remembered she walks straight at it, because it is the next
+        // room and the way into it is a doorway she can see.
+        //
+        // These are exclusive, and the wall commitment is not allowed to leak into
+        // the second case. It did, through an `else if` that only guarded the
+        // wall-following branch: she was being nudged by a wall, the commitment
+        // turned her aim a quarter turn, she walked into the doorway sideways and
+        // got nudged again, and she stood in the threshold of the first room of
+        // every maze for the whole round with a remembered destination and no way
+        // of walking to it.
+        if self.nav_weight > 0.0 {
+            if !self.nav_is_place {
+                let chosen = self.search_heading([to_seek_x, to_seek_y]);
+                aimed_x = chosen[0];
+                aimed_y = chosen[1];
+            }
+            // Wedged. Try the same way from a different angle, alternating which
+            // way that is.
+            //
+            // This is what anything with legs does when it is stuck, and it is the
+            // only thing that saves a character on her own. Two walls meeting at a
+            // corner cannot be resolved by pushing, because being pushed off one
+            // puts her into the other; a companion walks into her and shakes her
+            // loose, which is why a troupe always got through and a lone character
+            // stood in the first doorway for the whole round.
+            if self.stuck > STUCK_AFTER {
+                let (sin, cos) = (self.stuck_way * DEFLECT).sin_cos();
+                (aimed_x, aimed_y) = (
+                    to_seek_x * cos - to_seek_y * sin,
+                    to_seek_x * sin + to_seek_y * cos,
+                );
+                self.stuck_way = -self.stuck_way;
+            }
+        } else if self.wall_timer > 0.0 {
+            let (sin, cos) = (self.wall_turn * std::f32::consts::FRAC_PI_2).sin_cos();
+            (aimed_x, aimed_y) = (
+                to_seek_x * cos - to_seek_y * sin,
+                to_seek_x * sin + to_seek_y * cos,
+            );
+            self.wall_timer = (self.wall_timer - dt).max(0.0);
+        }
+        // The wander is what makes a milling character look alive, and it is
+        // exactly what stops a searching one from ever arriving. It fades out as
+        // the course takes her attention rather than being a separate code path,
+        // so there is still only one steering rule to reason about.
+        let idle = 1.0 - self.nav_weight;
+        let desired_x = aimed_x * 0.9
+            + (self.odor - 0.5) * 0.35 * idle
+            + (time * 0.35 + self.id as f32).sin() * 0.2 * idle;
+        let desired_y = aimed_y * 0.9
+            + (self.light - 0.5) * 0.25 * idle
+            + (time * 0.27 + self.id as f32 * 1.7).cos() * 0.15 * idle;
         // Walking speed is capped far below the old flight speed, and is
         // scaled by the learned stride rather than by raw thrust.
         let pace = (0.35 + 0.55 * self.gait_cadence) * (0.4 + 0.6 * self.gait_stride);
@@ -659,10 +1246,50 @@ impl Agent {
             self.position[axis] += self.velocity[axis] * dt * speed;
         }
         self.velocity[2] = 0.0;
+        // Whether she is actually getting anywhere. Measured from the ground she
+        // covered, because wanting to go somewhere and being able to go there are
+        // two different things and only one of them is progress.
+        let covered = (self.position[0] - from[0]).hypot(self.position[1] - from[1]);
+        self.stuck = if covered < STUCK_STEP {
+            (self.stuck + dt).min(STUCK_AFTER * 3.0)
+        } else {
+            0.0
+        };
         // She has moved, so she may now be inside something. Resolving here,
         // immediately after the move, is the only place it works: a pass that
         // runs later finds a position that has already passed through a wall.
-        self.slide_out_of_solids();
+        //
+        // The depth of the push decides whether it counts as being stuck. Grazing
+        // a wall is normal in a corridor and must not turn her, or she spends the
+        // whole round quarter-turned and walks in circles.
+        if self.slide_out_of_solids() > JAMMED {
+            // Genuinely wedged. Commit to going round it rather than into it,
+            // which is the difference between searching a maze and being stuck in
+            // the first dead end.
+            self.wall_timer = WALL_COMMITMENT;
+        }
+        // Remember where she got to, but only every so often: a point per
+        // centimetre is a very long trail and says nothing more than one per
+        // hand's width.
+        //
+        // The first point is written as soon as there is a trail to write into,
+        // and that is not a detail. Comparing against "the last point, or here if
+        // there are none" compares her against where she already is, which is
+        // always zero steps, so the trail never gets its first point and never
+        // gets any at all.
+        let last = self.trail.back().copied();
+        let moved_on = match last {
+            Some(point) => {
+                (self.position[0] - point[0]).hypot(self.position[1] - point[1]) > TRAIL_STEP
+            }
+            None => true,
+        };
+        if moved_on {
+            self.trail.push_back([self.position[0], self.position[1]]);
+            while self.trail.len() > TRAIL_MAX {
+                self.trail.pop_front();
+            }
+        }
 
         // ---- the walk cycle ----
         // Phase advances with distance covered, not with time, so a character
@@ -746,14 +1373,30 @@ impl Agent {
     }
 }
 
-fn adventure_spec(id: &str) -> (&'static str, &'static str) {
-    match id {
-        "odor_trail" => ("odor_trail", "Следуй за подвижным запахом"),
-        "ring_circuit" => ("ring_circuit", "Пролети кольцо арены три раза"),
-        "hormone_calibration" => ("hormone_calibration", "Собери сигнал и выпусти гормон"),
-        _ => ("free_flight", "Свободный полёт и исследование"),
-    }
-}
+/// How many cells across a course's grid.
+///
+/// Six is as many as the passages will take: a character is `BODY_RADIUS` wide
+/// and a corridor has to be wider than that, so the generator drops a cell from
+/// the grid rather than narrowing the walls. A smaller maze is walkable and a
+/// larger one is not.
+pub const COURSE_CELLS: usize = 6;
+
+/// How long a round lasts before the course is rebuilt under them.
+///
+/// Measured, not guessed. Searching a maze takes a character somewhere between
+/// nine seconds on an easy one and a couple of minutes on a hard one, and the
+/// median first arrival over a spread of mazes is about half a minute. A round
+/// has to be long enough that the interesting thing is usually the first one to
+/// arrive and the others following her, rather than the clock.
+pub const ROUND_LENGTH: f32 = 62.0;
+
+/// How long the round is left standing once everyone has eaten, in seconds.
+///
+/// Long enough to see. Without it the last arrival ends the round on the tick she
+/// touches the food, the maze is rebuilt under their feet, and they are back at
+/// the entrance before a frame is drawn: nobody sees the result and the panel
+/// never gets to say who won.
+pub const FEED_PAUSE: f32 = 3.5;
 
 // ===========================================================================
 // The five acts
@@ -1179,9 +1822,30 @@ pub struct EditorRuntime {
     total_hormones: u64,
     total_puffs: u64,
     learning_updates: u64,
-    adventure_id: String,
-    adventure_score: u32,
-    adventure_target: [f32; 2],
+    // ---- the course ----
+    //
+    // One maze per act, each rebuilt when its round ends. They are built eagerly
+    // for all five acts so switching acts does not stall, and each keeps its own
+    // seed so a troupe spread over the circus is not all solving the same puzzle.
+    courses: Vec<Course>,
+    /// The collision circles of each course, in arena coordinates. Derived from
+    /// the course once, when it is built, rather than every tick.
+    course_solids: Vec<Vec<[f32; 3]>>,
+    /// The round seed the per-character solid lists were last built for, and the
+    /// act they were built for. While these still match, nobody has moved scenery
+    /// and the lists are rebuilt not at all.
+    solids_built_for: u32,
+    solids_built_act: usize,
+    /// Rounds finished per character.
+    scores: Vec<u32>,
+    /// Which round the troupe is on.
+    round: u32,
+    /// Seconds left in this round.
+    round_time: f32,
+    /// Seconds of finish left to show before the maze is rebuilt, or zero.
+    feed_pause: f32,
+    /// The seed the current round was built from, so it can be repeated.
+    round_seed: u32,
     /// One trained brain per fly, indexed like `agents`.
     brains: Vec<Brain>,
     /// Which act each fly is currently in.
@@ -1506,9 +2170,15 @@ impl EditorRuntime {
             total_hormones: 0,
             total_puffs: 0,
             learning_updates: 0,
-            adventure_id: "free_flight".to_owned(),
-            adventure_score: 0,
-            adventure_target: [0.0, 0.0],
+            courses: Vec::new(),
+            course_solids: Vec::new(),
+            solids_built_for: u32::MAX,
+            solids_built_act: usize::MAX,
+            scores: vec![0; count],
+            round: 0,
+            round_time: 0.0,
+            feed_pause: 0.0,
+            round_seed: 0,
             brains: (0..count)
                 .map(|index| Brain::new(0x5EED + index as u32, index as u32 + 1))
                 .collect(),
@@ -1527,6 +2197,19 @@ impl EditorRuntime {
             partners: vec![None; count],
             encounter_timer: 0.0,
         }
+        // The courses are built here rather than lazily on first use, so the very
+        // first frame already has a maze under everyone's feet. `new` cannot call
+        // `build_courses`, because that needs `&mut self` on a value that is
+        // still being built, so the two steps are written out.
+        .with_courses(0x0C0FFEE)
+    }
+
+    /// Build the opening courses and put everyone at an entrance.
+    fn with_courses(mut self, seed: u32) -> Self {
+        self.round = 1;
+        self.round_time = ROUND_LENGTH;
+        self.build_courses(seed);
+        self
     }
 
     /// Record an event, keep it in memory, and mirror it to the JSONL sink.
@@ -1554,6 +2237,10 @@ impl EditorRuntime {
     fn send_to_act(&mut self, agent_index: usize, act_index: usize) {
         let act = &ACTS[act_index.min(ACTS.len() - 1)];
         self.acts[agent_index] = act_index;
+        // Her scenery just changed underneath her, so the cached lists of every
+        // character on the old act are stale. Saying so is one store; the lists
+        // themselves are rebuilt on the next tick.
+        self.solids_built_for = u32::MAX;
         let brain = &mut self.brains[agent_index];
         brain.fly.seed(0x5EED + agent_index as u32);
         brain.fly.clear_hormones();
@@ -1602,16 +2289,46 @@ impl EditorRuntime {
     /// movement has already happened cannot help, because the steering
     /// recomputes the velocity every tick and discards what an outside pass
     /// wrote to it.
+    /// Put the right solids under everybody's feet.
+    ///
+    /// Only when something has actually changed. The course is rebuilt once a
+    /// round and nobody moves scenery otherwise, so doing this every tick meant
+    /// allocating a fresh list of a few hundred circles per character per frame
+    /// and throwing it away sixty times a second: the single largest source of
+    /// garbage in the runtime, for a result identical to the last one.
     fn refresh_solids(&mut self) {
-        for i in 0..self.agents.len() {
-            let act = &ACTS[self.acts[i].min(ACTS.len() - 1)];
-            self.agents[i].solids = act
-                .colliders
-                .iter()
-                .filter(|c| c.radius > 0.0)
-                .map(|c| [act.origin[0] + c.x, act.origin[1] + c.z, c.radius])
-                .collect();
+        if self.solids_built_for == self.round_seed && self.solids_built_act == self.current_act {
+            for (i, act_index) in self.acts.iter().enumerate() {
+                let act = &ACTS[(*act_index).min(ACTS.len() - 1)];
+                self.agents[i].stage = [act.origin[0], act.origin[1], act.stage_radius];
+            }
+            return;
         }
+        for i in 0..self.agents.len() {
+            let act_index = self.acts[i].min(ACTS.len() - 1);
+            let act = &ACTS[act_index];
+            self.agents[i].stage = [act.origin[0], act.origin[1], act.stage_radius];
+            let world = |c: &Collider| [act.origin[0] + c.x, act.origin[1] + c.z, c.radius];
+            let list = &mut self.agents[i].solids;
+            list.clear();
+            if self.course_solids.get(act_index).is_some() {
+                // The course replaces the act's own scenery. The labyrinth's four
+                // ring walls *were* the maze, and left in place under a real maze
+                // they cut across it: two walls a body apart cannot be resolved by
+                // pushing, and she ends up standing inside one of them. The corner
+                // posts every stage shares stay, because they are outside the maze
+                // and are the edge of the stage.
+                list.extend(CORNER_POSTS.iter().map(world));
+            } else {
+                list.extend(act.colliders.iter().filter(|c| c.radius > 0.0).map(world));
+            }
+            if let Some(course) = self.course_solids.get(act_index) {
+                list.extend_from_slice(course);
+            }
+            list.shrink_to_fit();
+        }
+        self.solids_built_for = self.round_seed;
+        self.solids_built_act = self.current_act;
     }
 
     fn feed_ground_speed(&mut self, before: &[[f32; 2]]) {
@@ -1864,9 +2581,15 @@ impl EditorRuntime {
         };
         brain.fly.set_gait(chosen);
 
-        // Walk for a fixed window and see what happens. The visible body is
-        // advanced too, otherwise the distance measured would be zero while
-        // the character was plainly walking.
+        // Walk for a fixed window and see what happens. The body is advanced so
+        // the distance is real rather than zero, and then put back where it was.
+        //
+        // Putting it back is the whole point. A gait trial is a measurement, not
+        // a journey: it asks how far this gait carries her over a fixed window and
+        // nothing else. Leaving her where the trial ended moved her half a unit in
+        // a straight line twice a second, straight past every turn she had decided
+        // on, which on a course threw her into the wrong corridor several times a
+        // round. Where she actually is belongs to the course, not to the trainer.
         brain.fly.act(tfly::action::FORWARD, 1.0);
         brain.fly.steps(40, FIXED_DT);
         self.agents[index].advance(40, FIXED_DT);
@@ -1875,6 +2598,8 @@ impl EditorRuntime {
 
         let end = self.agents[index].position;
         let walked = ((end[0] - start[0]).powi(2) + (end[1] - start[1]).powi(2)).sqrt();
+        self.agents[index].position = start;
+        self.agents[index].velocity = [0.0, 0.0, 0.0];
         let score = tfly::gait_score(walked, energy_used, fell);
         // A gait that neither helps nor hurts is not evidence either way, so
         // only a real outcome is written down. Otherwise the character would
@@ -2142,16 +2867,297 @@ impl EditorRuntime {
         })
     }
 
-    fn update_adventure_target(&mut self) {
-        self.adventure_target = match self.adventure_id.as_str() {
-            "odor_trail" => [
-                (self.time * 0.8).sin() * 4.0,
-                (self.time * 0.55).cos() * 2.2,
-            ],
-            "ring_circuit" => [(self.time * 1.2).cos() * 3.8, (self.time * 1.2).sin() * 2.4],
-            "hormone_calibration" => [(self.time * 0.4).sin() * 3.0, (self.time * 0.6).cos() * 2.0],
-            _ => [0.0, 0.0],
+    /// Build every act's course, and put everyone on the one for their act.
+    ///
+    /// The five acts get five different seeds, so a troupe spread across the
+    /// circus is not all looking at the same maze. The seed the current round was
+    /// built from is kept, because a round has to be repeatable or a bug report
+    /// is a description of a maze nobody else will ever see.
+    fn build_courses(&mut self, seed: u32) {
+        self.courses = (0..ACTS.len())
+            .map(|index| {
+                Course::build(
+                    seed.wrapping_add(0x9E37_79B9u32.wrapping_mul(index as u32 + 1)),
+                    COURSE_CELLS,
+                    ACTS[index].stage_radius,
+                )
+            })
+            .collect();
+        self.course_solids = self
+            .courses
+            .iter()
+            .enumerate()
+            .map(|(index, course)| {
+                let [ax, ay] = ACTS[index].origin;
+                course
+                    .solids()
+                    .into_iter()
+                    .map(|[x, z, r]| [ax + x, ay + z, r])
+                    .collect()
+            })
+            .collect();
+        self.round_seed = seed;
+        self.refresh_solids();
+        self.send_everyone_to_the_start();
+    }
+
+    /// Put every character at the entrance of their own act's course.
+    fn send_everyone_to_the_start(&mut self) {
+        for index in 0..self.agents.len() {
+            let act_index = self.acts[index].min(ACTS.len() - 1);
+            let Some(course) = self.courses.get(act_index) else {
+                continue;
+            };
+            // A fan of a few points around the entrance, so they do not start
+            // inside one another and the first thing on screen is not a pile.
+            let spread = index as f32 * 1.7;
+            let [ax, ay] = ACTS[act_index].origin;
+            self.agents[index].position[0] = ax + course.start[0] + 0.10 * spread.cos();
+            self.agents[index].position[1] = ay + course.start[1] + 0.10 * spread.sin();
+            self.agents[index].position[2] = 0.0;
+            self.agents[index].velocity = [0.0, 0.0, 0.0];
+            self.agents[index].fed = false;
+            self.agents[index].trail.clear();
+            // The new maze is a new place. What she worked out about the last one
+            // is worth exactly nothing here, and keeping it would be the worst
+            // possible bug: she would walk confidently to a wall that is not there.
+            self.agents[index].search =
+                (!course.passages.is_empty()).then(|| Search::new(&course.passages));
+            self.agents[index].nav = [ax + course.start[0], ay + course.start[1]];
+            self.agents[index].nav_weight = 0.0;
+        }
+    }
+
+    /// Has a character reached the food on her course?
+    ///
+    /// Returns true only on the tick it happens, so the caller can pay out once.
+    /// The reward goes into the brain, not into a counter, because a character
+    /// that found the food should look like it: the pulse is what the face and
+    /// the posture are reading.
+    fn try_feed(&mut self, index: usize) -> bool {
+        let act_index = self.acts[index].min(ACTS.len() - 1);
+        let Some(course) = self.courses.get(act_index) else {
+            return false;
         };
+        if self.agents[index].fed {
+            return false;
+        }
+        let [ax, ay] = ACTS[act_index].origin;
+        let dx = self.agents[index].position[0] - (ax + course.goal[0]);
+        let dy = self.agents[index].position[1] - (ay + course.goal[1]);
+        if dx.hypot(dy) > FOOD_REACH {
+            return false;
+        }
+        self.agents[index].fed = true;
+        self.learning_updates = self.learning_updates.saturating_add(1);
+        let id = self.agents[index].id;
+        let act = ACTS[act_index].name;
+        self.log(LogEntry {
+            t: 0.0,
+            fly: id,
+            kind: "fed".to_owned(),
+            text: format!(
+                "дошла до еды на «{act}» за {} с",
+                (ROUND_LENGTH - self.round_time).max(0.0).round()
+            ),
+        });
+        true
+    }
+
+    /// The course as the client needs it, for the act currently being broadcast.
+    ///
+    /// Stage-local, like the act's colliders, so the client places it on the stage
+    /// it already builds rather than having to know where the stages are.
+    fn course_snapshot(&self) -> CourseSnapshot {
+        let act_index = self.current_act.min(ACTS.len() - 1);
+        let Some(course) = self.courses.get(act_index) else {
+            return CourseSnapshot {
+                round: self.round,
+                seed: self.round_seed,
+                time_left: self.round_time,
+                round_length: ROUND_LENGTH,
+                food: [0.0, 0.0],
+                cell: 0.0,
+                start: [0.0, 0.0],
+                path_length: 0.0,
+                walls: Vec::new(),
+                runners: Vec::new(),
+                fed: 0,
+                count: 0,
+            };
+        };
+        let runners: Vec<RunnerSnapshot> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| self.acts[*index].min(ACTS.len() - 1) == act_index)
+            .map(|(index, agent)| {
+                // Stage-local, because the client draws on the stage.
+                let [ax, ay] = ACTS[act_index].origin;
+                let distance = (agent.position[0] - ax - course.goal[0])
+                    .hypot(agent.position[1] - ay - course.goal[1]);
+                let worst = course
+                    .path_length
+                    .max((course.goal[0] - course.start[0]).hypot(course.goal[1] - course.start[1]))
+                    .max(0.001);
+                RunnerSnapshot {
+                    id: agent.id,
+                    fed: agent.fed,
+                    distance,
+                    progress: (1.0 - distance / worst).clamp(-1.0, 1.0),
+                    score: self.scores[index],
+                    // A character who is out of the round has nothing left to
+                    // show, and a trail she no longer needs costs the client a
+                    // draw every frame.
+                    trail: agent.trail.iter().map(|p| [p[0] - ax, p[1] - ay]).collect(),
+                }
+            })
+            .collect();
+        CourseSnapshot {
+            round: self.round,
+            seed: self.round_seed,
+            time_left: self.round_time,
+            round_length: ROUND_LENGTH,
+            food: course.goal,
+            cell: course.cell,
+            start: course.start,
+            path_length: course.path_length,
+            walls: course
+                .walls
+                .iter()
+                .map(|w| WallSnapshot {
+                    x: w.x,
+                    z: w.z,
+                    half_len: w.half_len,
+                    half_thick: w.half_thick,
+                    angle: w.angle,
+                })
+                .collect(),
+            fed: runners.iter().filter(|r| r.fed).count() as u32,
+            count: runners.len() as u32,
+            runners,
+        }
+    }
+
+    /// Give a character something to walk towards.
+    ///
+    /// Two pulls, and neither of them is the route. The first is the smell of the
+    /// food, which falls off with distance and is therefore weak from across the
+    /// stage and strong in the last corridor: enough to aim her across the open
+    /// floor, not enough to walk her round a wall. The second is the freshest
+    /// breadcrumb any character who has already eaten left behind, which is the
+    /// only thing one of them teaches another. Handing over the solved route
+    /// instead would make her walk it in a straight line and look like a cursor.
+    /// Give a character something to walk towards.
+    ///
+    /// Three pulls, in order of how far each is trusted.
+    ///
+    /// The first is what she remembers: the next place worth trying, which is a
+    /// place she has not been if there is one, and failing that the way back to
+    /// the last place that still had somewhere new to go. This is what makes her
+    /// finish. Feeling along the walls on her own does not: she reaches a dead end,
+    /// the way back smells exactly like the way on, and she works the same three
+    /// metres of passage for as long as the round lasts.
+    ///
+    /// The second is the smell of the food, which is her initial heading on a
+    /// course she has not started yet, and a small lean once she is nearly
+    /// somewhere worth standing.
+    ///
+    /// The third is the freshest breadcrumb any character who has already eaten
+    /// left behind, which is the only thing one of them teaches another. Handing
+    /// over the solved route instead would make her walk it in a straight line and
+    /// look like a cursor.
+    fn navigate(&mut self, index: usize) -> [f32; 2] {
+        let act_index = self.acts[index].min(ACTS.len() - 1);
+        let [ax, ay] = ACTS[act_index].origin;
+        let Some(course) = self.courses.get(act_index) else {
+            return [ax, ay];
+        };
+        let me = [
+            self.agents[index].position[0],
+            self.agents[index].position[1],
+        ];
+        let local = [me[0] - ax, me[1] - ay];
+        let food = course.goal;
+        let to_food = [food[0] - local[0], food[1] - local[1]];
+        let food_distance = to_food[0].hypot(to_food[1]).max(1e-4);
+        // Falls off with the square of the distance, so the pull is a gradient to
+        // climb rather than a direction to obey.
+        let smell = 1.0 / (1.0 + food_distance * food_distance * 1.6);
+        let smell_dir = [to_food[0] / food_distance, to_food[1] / food_distance];
+
+        // What she remembers, if she can name where she is standing.
+        let mut remembered: Option<[f32; 2]> = None;
+        if let Some(food_cell) = course.cell_at(food) {
+            let here = course.cell_at(local);
+            let agent = &mut self.agents[index];
+            if agent.search.is_none() && !course.passages.is_empty() {
+                agent.search = Some(Search::new(&course.passages));
+            }
+            if let (Some(search), Some(here)) = (agent.search.as_mut(), here) {
+                search.arrive(here);
+                // A promise is kept when her feet are in the middle of the place
+                // she promised, not when the doorway renames her.
+                if let Some(going) = search.committing
+                    && let Some(centre) = course.centres.get(going)
+                {
+                    let d = (centre[0] - local[0]).hypot(centre[1] - local[1]);
+                    if d < course.cell * 0.3 {
+                        search.committing = None;
+                    }
+                }
+                if let Some(next) = search.next(food_cell) {
+                    remembered = course.centres.get(next).copied();
+                }
+            }
+        }
+        // A remembered place is one cell away at most, so the smell only decides
+        // which side of the cell to aim for. A place already proved useless must
+        // not drag her back in on the strength of a whiff of dinner.
+        if let Some(target) = remembered {
+            self.agents[index].nav_is_place = true;
+            let d = (target[0] - local[0]).hypot(target[1] - local[1]).max(1e-4);
+            let lean = (1.0 - (d / course.cell).min(1.0)) * (smell * 3.0).min(0.4);
+            let ux = (target[0] - local[0]) / d * (1.0 - lean) + smell_dir[0] * lean;
+            let uy = (target[1] - local[1]) / d * (1.0 - lean) + smell_dir[1] * lean;
+            let len = ux.hypot(uy).max(1e-4);
+            return [ax + local[0] + ux / len, ay + local[1] + uy / len];
+        }
+
+        // The freshest crumb from anyone who has eaten, on this act.
+        let mut lure = [0.0f32; 2];
+        let mut lure_strength = 0.0f32;
+        for (other, agent) in self.agents.iter().enumerate() {
+            if other == index || !agent.fed {
+                continue;
+            }
+            if self.acts[other].min(ACTS.len() - 1) != act_index {
+                continue;
+            }
+            let Some(point) = agent.trail.back() else {
+                continue;
+            };
+            let dx = point[0] - me[0];
+            let dy = point[1] - me[1];
+            let near = (dx * dx + dy * dy).sqrt().max(1e-4);
+            // A crumb only counts if it is nearer than the food is, so a trail
+            // does not drag her back the way she came.
+            let strength = smell * (1.0 - (near / food_distance).min(1.0)) * 0.8;
+            if strength > lure_strength {
+                lure_strength = strength;
+                lure = [point[0] + dx / near * 0.25, point[1] + dy / near * 0.25];
+            }
+        }
+        self.agents[index].nav_is_place = false;
+        if lure_strength <= 0.0 {
+            return [ax + local[0] + smell_dir[0], ay + local[1] + smell_dir[1]];
+        }
+        let ld = (lure[0] - me[0]).hypot(lure[1] - me[1]).max(1e-4);
+        let w = lure_strength.min(0.85);
+        let ux = smell_dir[0] * (1.0 - w) + (lure[0] - me[0]) / ld * w;
+        let uy = smell_dir[1] * (1.0 - w) + (lure[1] - me[1]) / ld * w;
+        let len = ux.hypot(uy).max(1e-4);
+        [ax + local[0] + ux / len, ay + local[1] + uy / len]
     }
 
     pub fn step(&mut self, dt: f32) {
@@ -2160,8 +3166,6 @@ impl EditorRuntime {
         }
         self.time += dt * self.speed;
         self.tick += 1;
-        self.update_adventure_target();
-        let target = self.adventure_target;
         // Where everyone stood before this tick, so the ground speed can be
         // measured from the displacement rather than believed from the steering.
         let before: Vec<[f32; 2]> = self
@@ -2192,6 +3196,19 @@ impl EditorRuntime {
             self.agents[index].gait_sway = brain.fly.gait_sway();
             self.agents[index].balance = brain.fly.balance();
             self.agents[index].steps = brain.fly.step_count() as u64;
+            // She has a course to run, so she is pointed at it and stops merely
+            // circling her stage. A character who has eaten is out of the round
+            // and goes back to milling, which reads as finished rather than as
+            // somebody who forgot where she was going.
+            let act_index = self.acts[index].min(ACTS.len() - 1);
+            if self.courses.get(act_index).is_some() && !self.agents[index].fed {
+                let nav = self.navigate(index);
+                self.agents[index].nav = nav;
+                self.agents[index].nav_weight = 1.0;
+            } else {
+                self.agents[index].nav_weight = 0.0;
+                self.agents[index].nav_is_place = false;
+            }
             self.agents[index].steer_towards([ax, ay], 1.2, dt * self.speed);
             self.total_reactions += 1;
             if self.agents[index].hormone_level > 0.25 {
@@ -2200,14 +3217,13 @@ impl EditorRuntime {
             if self.agents[index].puff_just_started {
                 self.total_puffs = self.total_puffs.saturating_add(1);
             }
-            if self.adventure_id != "free_flight" {
-                let dx = self.agents[index].position[0] - target[0];
-                let dy = self.agents[index].position[1] - target[1];
-                if (dx * dx + dy * dy).sqrt() < 0.85 {
-                    self.adventure_score = self.adventure_score.saturating_add(1);
-                    self.learning_updates += 1;
-                    self.agents[index].reward = (self.agents[index].reward + 0.08).min(1.0);
-                }
+            if self.try_feed(index) {
+                // Reaching the food is the one thing in the runtime worth a
+                // reward, so it goes into the brain rather than into a counter the
+                // client keeps: she gets a pulse, and the character that finds it
+                // first is the one that looks rewarded.
+                self.brains[index].fly.reward(0.9);
+                self.agents[index].reward = 1.0;
             }
         }
 
@@ -2245,6 +3261,15 @@ impl EditorRuntime {
         // they are close, not once every encounter tick.
         self.aim_gaze_at_partners();
         self.resolve_personal_space(dt);
+        // And then the walls again, because easing two characters apart is a
+        // displacement of its own and it can push one of them into a wall. The
+        // body resolved its own movement before the others moved it, so without
+        // this a shove is the one thing that puts somebody inside the scenery.
+        for agent in &mut self.agents {
+            if agent.slide_out_of_solids() > JAMMED {
+                agent.wall_timer = WALL_COMMITMENT;
+            }
+        }
         // Scenery last: a character has already been pushed by the others, and
         // the wall is the harder boundary of the two.
         self.refresh_solids();
@@ -2252,6 +3277,65 @@ impl EditorRuntime {
         // Measured after everything has moved her, so it reports where she
         // actually ended up rather than where she was aiming.
         self.feed_ground_speed(&before);
+
+        // The round ends when everyone has eaten or when the clock runs out,
+        // whichever comes first, and a new maze is built under their feet. That
+        // is the point of rebuilding: a route worked out in the last round is
+        // worth nothing in this one, so the round cannot be won twice.
+        self.round_time -= dt * self.speed;
+        let all_fed = !self.agents.is_empty() && self.agents.iter().all(|a| a.fed);
+        if all_fed {
+            // Not this tick. The last character to arrive ends the round the
+            // instant she touches the food, the maze is rebuilt under the troupe,
+            // and everybody is stood back at the entrance before a frame has been
+            // drawn. Nobody sees the thing they just won, and the panel has no
+            // chance to say who won it. So the round is left standing for a few
+            // seconds with the food gone and the score showing, which is what a
+            // finish looks like.
+            if self.feed_pause <= 0.0 {
+                self.feed_pause = FEED_PAUSE;
+            }
+            self.feed_pause -= dt * self.speed;
+        }
+        if (all_fed && self.feed_pause <= 0.0) || self.round_time <= 0.0 {
+            self.feed_pause = 0.0;
+            self.end_round(all_fed);
+        }
+    }
+
+    /// Close the round, score it, and build the next one.
+    fn end_round(&mut self, everyone_ate: bool) {
+        for index in 0..self.agents.len() {
+            if self.agents[index].fed {
+                self.scores[index] = self.scores[index].saturating_add(1);
+            }
+        }
+        let round = self.round;
+        let eaten = self.agents.iter().filter(|a| a.fed).count();
+        let total = self.agents.len();
+        let why = if everyone_ate {
+            "все дошли"
+        } else if eaten == 0 {
+            "никто не дошёл"
+        } else {
+            "время вышло"
+        };
+        self.log(LogEntry {
+            t: 0.0,
+            fly: 0,
+            kind: "round".to_owned(),
+            text: format!("раунд {round}: {why} ({eaten} из {total})"),
+        });
+        self.round = round.saturating_add(1).max(1);
+        self.round_time = ROUND_LENGTH;
+        // A new seed every round, so the course is a new problem each time. The
+        // seed advances from the last one rather than being drawn fresh, so a
+        // session is reproducible from its first round.
+        let next = self
+            .round_seed
+            .wrapping_mul(1_664_525)
+            .wrapping_add(1_013_904_223);
+        self.build_courses(next);
     }
 
     pub fn snapshot(&self, fps: f32) -> EditorSnapshot {
@@ -2327,21 +3411,7 @@ impl EditorRuntime {
             decay: self.decay,
             selected_fly: self.selected,
             agents,
-            adventure: {
-                let (name, objective) = adventure_spec(&self.adventure_id);
-                AdventureSnapshot {
-                    id: self.adventure_id.clone(),
-                    name: name.to_owned(),
-                    objective: objective.to_owned(),
-                    progress: if self.adventure_id == "free_flight" {
-                        1.0
-                    } else {
-                        (self.adventure_score % 100) as f32 / 100.0
-                    },
-                    score: self.adventure_score,
-                    target: self.adventure_target,
-                }
-            },
+            course: self.course_snapshot(),
             acts: self.act_snapshots(),
             training: TrainingSnapshot {
                 enabled: self.training,
@@ -2422,12 +3492,23 @@ impl EditorRuntime {
                     self.learning_updates = self.learning_updates.saturating_add(1);
                 }
             }
-            "adventure" => {
-                let requested = command.name.context("adventure requires name")?;
-                let (id, _) = adventure_spec(&requested);
-                self.adventure_id = id.to_owned();
-                self.adventure_score = 0;
-                self.update_adventure_target();
+            // Build a new course now, without waiting for the round to end. The
+            // seed is optional, so a round can be asked for by number and
+            // repeated exactly.
+            "course" => {
+                let seed = command
+                    .value
+                    .map(|v| v.max(0.0) as u32)
+                    .unwrap_or_else(|| self.round_seed.wrapping_mul(2_654_435_761).wrapping_add(1));
+                self.round = self.round.saturating_add(1).max(1);
+                self.round_time = ROUND_LENGTH;
+                self.build_courses(seed);
+                self.log(LogEntry {
+                    t: 0.0,
+                    fly: 0,
+                    kind: "round".to_owned(),
+                    text: format!("новая полоса, seed {seed}"),
+                });
             }
             // Send flies into one of the five acts. Without an id, every fly
             // goes; with an id, only that fly does.
@@ -2439,8 +3520,6 @@ impl EditorRuntime {
                     .position(|candidate| candidate.id == act.id)
                     .unwrap_or(0);
                 self.current_act = act_index;
-                self.adventure_id = "free_flight".to_owned();
-                self.update_adventure_target();
                 match command.id {
                     Some(id) => {
                         if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
@@ -3373,17 +4452,23 @@ mod tests {
             stage.stage_height
         );
 
-        // And step down to the tent floor when she leaves it. Half a second is
-        // plenty for the height to fall, and short enough that the steering
-        // has not walked her back onto the stage and made the check vacuous.
+        // And step down to the tent floor when she leaves it.
+        //
+        // One step, and that is the point. She has a course now and the food is
+        // on her stage, so she walks back onto it: waiting for the height to settle
+        // used to be enough and now is not, because waiting is time enough to be
+        // carried back. What is checked here is the surface under her feet, and
+        // that answers in one step.
         runtime.agents[0].position[0] = stage.origin[0] + stage.stage_radius + 0.8;
-        for _ in 0..30 {
-            runtime.step(FIXED_DT);
-        }
-        let off = runtime.snapshot(60.0).agents[0].ground;
+        runtime.step(FIXED_DT);
+        let leaving = runtime.snapshot(60.0).agents[0].ground;
         assert!(
-            off < 0.01,
-            "and back down to the floor once she is off it, got {off}"
+            leaving < stage.stage_height,
+            "the floor has to start dropping as she leaves the stage, got {leaving}"
+        );
+        assert!(
+            leaving > 0.0,
+            "and it is eased, not dropped in one step, got {leaving}"
         );
     }
 
@@ -3415,6 +4500,10 @@ mod tests {
         // The scenery and the colliders come from the same numbers, so this is
         // checking that the resolution actually works rather than that the two
         // lists agree.
+        //
+        // It measures against the course, because that is what she is walking into
+        // now. The labyrinth's old ring of walls is scenery no more, and testing
+        // against it would pass without her ever meeting it.
         let mut runtime = EditorRuntime::new(1);
         runtime
             .apply_command(br#"{"action":"act","name":"labyrinth"}"#)
@@ -3423,28 +4512,26 @@ mod tests {
             .iter()
             .find(|a| a.id == "labyrinth")
             .expect("the labyrinth act exists");
-        let wall = stage
-            .colliders
+        let wall = runtime.course_solids[1]
             .iter()
-            .find(|c| c.radius > 0.2)
             .copied()
-            .expect("the labyrinth has walls to walk into");
-        let inside = wall.x.abs() < stage.stage_radius;
+            .find(|c| c[2] > 0.0)
+            .expect("the course has walls to walk into");
         assert!(
-            inside,
+            wall[0].abs() < stage.stage_radius + stage.origin[0].abs(),
             "the wall has to be on the stage to be worth testing"
         );
 
         // Start her well past the wall and let the steering pull her back.
-        runtime.agents[0].position[0] = stage.origin[0] + wall.x * 3.0;
-        runtime.agents[0].position[1] = stage.origin[1] + wall.z * 3.0;
+        runtime.agents[0].position[0] = wall[0] * 3.0;
+        runtime.agents[0].position[1] = wall[1] * 3.0;
         let mut worst = 0.0f32;
         for _ in 0..3000 {
             runtime.step(FIXED_DT);
             let a = &runtime.agents[0];
-            let dx = a.position[0] - (stage.origin[0] + wall.x);
-            let dy = a.position[1] - (stage.origin[1] + wall.z);
-            let depth = wall.radius + BODY_RADIUS - (dx * dx + dy * dy).sqrt();
+            let dx = a.position[0] - wall[0];
+            let dy = a.position[1] - wall[1];
+            let depth = wall[2] + BODY_RADIUS - (dx * dx + dy * dy).sqrt();
             if depth > worst {
                 worst = depth;
             }
@@ -3508,17 +4595,179 @@ mod tests {
         );
     }
 
-    #[test]
-    fn editor_adventure_target_follows_time() {
-        let mut runtime = EditorRuntime::new(2);
-        runtime
-            .apply_command(br#"{"action":"adventure","name":"odor_trail"}"#)
-            .expect("adventure");
-        let first = runtime.snapshot(60.0).adventure.target;
-        for _ in 0..120 {
+    /// How many seconds of simulation a character is given to find the food.
+    const COURSE_BUDGET: f32 = 240.0;
+
+    /// Walk a fresh runtime until somebody eats, and say how long it took.
+    ///
+    /// The whole feature is "the flies do something", so this is the measurement
+    /// that matters: a course nobody can solve is a hedge, and a course solved in
+    /// a second is a straight line.
+    fn time_until_someone_eats(fly_count: usize) -> Option<f32> {
+        let mut runtime = EditorRuntime::new(fly_count);
+        let mut elapsed = 0.0f32;
+        while elapsed < COURSE_BUDGET {
             runtime.step(FIXED_DT);
+            elapsed += FIXED_DT;
+            if runtime.snapshot(60.0).course.fed > 0 {
+                return Some(elapsed);
+            }
         }
-        let second = runtime.snapshot(60.0).adventure.target;
-        assert!((first[0] - second[0]).abs() > 0.001 || (first[1] - second[1]).abs() > 0.001);
+        None
+    }
+
+    #[test]
+    fn somebody_finds_the_food_and_the_food_is_on_the_course() {
+        // The point of the whole thing. A maze nobody can solve is a hedge, and a
+        // score that only goes up when a character happens to walk over a drifting
+        // target point is what this replaced.
+        let Some(seconds) = time_until_someone_eats(3) else {
+            panic!("nobody found the food in {COURSE_BUDGET} s of simulation");
+        };
+        assert!(
+            seconds > 0.5,
+            "the food was reached in {seconds:.2} s, which is not a search"
+        );
+        let course = EditorRuntime::new(3).snapshot(60.0).course;
+        assert!(!course.walls.is_empty(), "the course drew no walls");
+        assert!(course.path_length > 0.0, "the course has no route");
+        assert!(course.count > 0, "nobody is on the course");
+    }
+
+    #[test]
+    fn a_character_reaches_the_food_on_a_course_she_can_walk() {
+        // A single character has nobody to follow a trail of, so this is the
+        // honest test of the searching on its own: the smell pulls her across the
+        // floor and the wall commitment gets her round the obstacles.
+        for seed in [7u32, 101, 2024] {
+            let mut runtime = EditorRuntime::new(1);
+            runtime
+                .apply_command(format!(r#"{{"action":"course","value":{seed}}}"#).as_bytes())
+                .expect("course");
+            let mut elapsed = 0.0f32;
+            let mut ate = false;
+            while elapsed < COURSE_BUDGET && !ate {
+                runtime.step(FIXED_DT);
+                elapsed += FIXED_DT;
+                ate = runtime.snapshot(60.0).course.runners[0].fed;
+            }
+            assert!(ate, "seed {seed}: she never found the food");
+        }
+    }
+
+    #[test]
+    fn the_course_is_rebuilt_and_the_route_is_not_reusable() {
+        // Rebuilding is the whole reason a round is a round. If the same maze came
+        // back, a character could learn it once and never look again, and the
+        // thing on screen would be a rehearsal.
+        let mut runtime = EditorRuntime::new(1);
+        let first = runtime.snapshot(60.0).course;
+        runtime
+            .apply_command(br#"{"action":"course","value":987654}"#)
+            .expect("course");
+        let second = runtime.snapshot(60.0).course;
+        assert_ne!(first.walls.len(), 0);
+        assert_ne!(
+            first.walls, second.walls,
+            "a new seed produced the same maze"
+        );
+    }
+
+    #[test]
+    fn everyone_starts_at_the_entrance_and_nobody_starts_inside_a_wall() {
+        let runtime = EditorRuntime::new(3);
+        let course = runtime.snapshot(60.0).course;
+        assert_eq!(course.count, 3);
+        // The food has to be a walk away, not a stride. The route is the honest
+        // measure and it is what the panel shows.
+        assert!(
+            course.path_length > course.cell * 3.0,
+            "the course is a walk of {:.2}, too short to be one",
+            course.path_length
+        );
+        for runner in &course.runners {
+            assert!(runner.distance > 0.0, "a character started on the food");
+        }
+    }
+
+    #[test]
+    fn a_character_never_ends_a_frame_inside_a_wall() {
+        // The collision lives in the body and runs immediately after the move. With
+        // a maze in the way, "immediately after" is the difference between walking
+        // round a wall and being inside one every few frames.
+        let mut runtime = EditorRuntime::new(3);
+        let mut worst = 0.0f32;
+        for _ in 0..1200 {
+            runtime.step(FIXED_DT);
+            for agent in &runtime.agents {
+                for solid in &agent.solids {
+                    if solid[2] <= 0.0 {
+                        continue;
+                    }
+                    let dx = agent.position[0] - solid[0];
+                    let dz = agent.position[1] - solid[1];
+                    let overlap = solid[2] + BODY_RADIUS - dx.hypot(dz);
+                    worst = worst.max(overlap);
+                }
+            }
+        }
+        assert!(
+            worst < 0.02,
+            "a character was {worst:.4} inside a wall at the end of a frame"
+        );
+    }
+
+    #[test]
+    fn reaching_the_food_rewards_the_brain_and_not_only_a_counter() {
+        // The reward goes into the character, so the one that finds the food looks
+        // like it: the pulse is what the face and the posture are reading, and a
+        // counter in the snapshot would look like nothing at all.
+        let mut runtime = EditorRuntime::new(1);
+        let mut before = None;
+        let mut elapsed = 0.0f32;
+        let mut rewarded = false;
+        while elapsed < COURSE_BUDGET {
+            runtime.step(FIXED_DT);
+            elapsed += FIXED_DT;
+            if before.is_none() {
+                before = Some(runtime.snapshot(60.0).agents[0].reward);
+            }
+            if runtime.snapshot(60.0).course.runners[0].fed {
+                rewarded = true;
+                break;
+            }
+        }
+        assert!(rewarded, "she never found the food to be rewarded for");
+        assert_eq!(runtime.snapshot(60.0).agents[0].reward, 1.0);
+        let _ = before;
+    }
+
+    #[test]
+    fn a_round_ends_and_the_next_one_is_a_new_problem() {
+        let mut runtime = EditorRuntime::new(2);
+        let first = runtime.snapshot(60.0).course.round;
+        // Force the round out rather than waiting out the clock.
+        runtime.round_time = 0.001;
+        runtime.step(FIXED_DT);
+        let after = runtime.snapshot(60.0).course;
+        assert!(after.round > first, "the round did not advance");
+        assert!(after.time_left > 1.0, "the next round started with no time");
+        assert!(
+            after.runners.iter().all(|r| !r.fed),
+            "somebody is still fed"
+        );
+    }
+
+    #[test]
+    fn the_round_log_says_how_the_round_went() {
+        let mut runtime = EditorRuntime::new(1);
+        runtime.round_time = 0.001;
+        runtime.step(FIXED_DT);
+        let state = runtime.snapshot(60.0);
+        let texts: Vec<&str> = state.training.log.iter().map(|e| e.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("раунд")),
+            "nobody said how the round went: {texts:?}"
+        );
     }
 }

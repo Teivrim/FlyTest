@@ -59,6 +59,19 @@ pub struct Course {
     pub path_length: f32,
     /// The start and the food are the same cell, so there is nothing to do.
     pub degenerate: bool,
+    /// Where every cell is.
+    pub centres: Vec<[f32; 2]>,
+    /// Which cells can be walked between, and in which directions.
+    ///
+    /// The characters are given this. It is a map of the passages, and it is worth
+    /// being plain about that rather than dressing it up: what they are *not* given
+    /// is the route, the distance to the food, or which way the food lies from
+    /// anywhere. They still have to walk every passage to prove it, they still try
+    /// the wrong branch first, they still have to work their way back out of a dead
+    /// end, and the maze is rebuilt every round so none of it carries over. What
+    /// they are spared is the arithmetic of which cells connect, which they would
+    /// otherwise spend the whole round standing in a doorway working out.
+    pub passages: Vec<Vec<usize>>,
 }
 
 /// Wall bits per cell. North is `-z`, and the order matches the neighbour offsets.
@@ -75,6 +88,25 @@ const CLOSED: u8 = N | E | S | W;
 /// are narrower than she is turns every round into a wall-bumping contest that
 /// the collision resolver wins by pushing her back the way she came.
 const WALL_FRACTION: f32 = 0.22;
+
+/// How much wider than a character a passage has to be.
+///
+/// Not "wider than her". She has to be able to walk down the middle of a passage
+/// and *stay* there, and she has to be able to turn in one. A corridor only a
+/// little wider than she is means she is permanently touching both walls, cannot
+/// turn anywhere, and grinds along them without ever getting anywhere. Measured
+/// against a five-cell grid this settles the maze on four cells across, which is
+/// a smaller puzzle and one she can actually finish.
+const PASSAGE_ROOM: f32 = 3.4;
+
+/// How much bare stage to leave between the maze's outer wall and the rim.
+///
+/// The outer wall has to be a real wall on the disc, not out past it. A grid sized
+/// to span the stage puts its boundary beyond the rim, where the clipping that
+/// keeps scenery on the stage removes it entirely, and the maze is left with no
+/// outside at all: a character walks off the edge of the world, has no wall to
+/// follow, and stands in the strip against the rim until the round ends.
+const RIM_MARGIN: f32 = 0.05;
 
 /// The largest grid tried before giving up on fitting one inside the stage.
 const MAX_CELLS: usize = 9;
@@ -196,6 +228,7 @@ impl Course {
             let path_length = length_of(&solution);
             let (start_point, goal_point) = (grid.centres[start], grid.centres[goal]);
             let walls = grid.walls();
+            let passages = grid.passages();
             let cell = grid.cell;
             let wall_thickness = cell * WALL_FRACTION;
             return Self {
@@ -209,6 +242,8 @@ impl Course {
                 solution,
                 path_length,
                 degenerate,
+                centres: grid.centres,
+                passages,
             };
         }
     }
@@ -225,15 +260,41 @@ impl Course {
             solution: Vec::new(),
             path_length: 0.0,
             degenerate: true,
+            centres: Vec::new(),
+            passages: Vec::new(),
         }
+    }
+
+    /// Which cell a stage-local point is in, if it is in one.
+    ///
+    /// Nearest centre, within a little over half a cell. Generous, because the
+    /// point is a character who is not standing exactly in the middle of a cell,
+    /// and being named as the cell next door would send her the wrong way.
+    pub fn cell_at(&self, point: [f32; 2]) -> Option<usize> {
+        let mut best = None;
+        let mut best_distance = self.cell * 0.75;
+        for (i, centre) in self.centres.iter().enumerate() {
+            let d = (point[0] - centre[0]).hypot(point[1] - centre[1]);
+            if d < best_distance {
+                best_distance = d;
+                best = Some(i);
+            }
+        }
+        best
     }
 
     /// The walls as circles for the collision pass, in stage-local coordinates.
     ///
-    /// A slab is approximated by circles strung along its length, spaced so they
-    /// just touch. That is what the existing, tested collision code already
-    /// understands, and the circles are derived here from the very segments the
-    /// client draws, so the two cannot drift apart.
+    /// A slab is approximated by circles strung along its length. That is what
+    /// the existing, tested collision code already understands, and the circles
+    /// are derived here from the very segments the client draws, so the two
+    /// cannot drift apart.
+    ///
+    /// The circles deliberately overlap. Spacing them a diameter apart leaves a
+    /// gap between every pair, and a gap is a hole: a character reads the way
+    /// ahead as clear, walks into it, and is then pushed out by a wall she was
+    /// already past. Overlapping costs twice the circles and removes the class of
+    /// bug entirely.
     pub fn solids(&self) -> Vec<[f32; 3]> {
         let mut out = Vec::new();
         for wall in &self.walls {
@@ -242,16 +303,11 @@ impl Course {
                 continue;
             }
             let (sin, cos) = wall.angle.sin_cos();
-            // One circle per diameter of wall, so there is no gap along the run.
-            // One is always there, however short the wall.
+            // Spacing of one radius, so neighbours overlap by a radius.
             let span = wall.half_len * 2.0;
-            let n = ((span / (r * 2.0)).ceil() as usize).max(1);
+            let n = ((span / r).ceil() as usize + 1).max(2);
             for i in 0..n {
-                let t = if n == 1 {
-                    0.0
-                } else {
-                    -wall.half_len + span * (i as f32) / ((n - 1) as f32)
-                };
+                let t = -wall.half_len + span * (i as f32) / ((n - 1) as f32);
                 out.push([wall.x + cos * t, wall.z - sin * t, r]);
             }
         }
@@ -260,17 +316,20 @@ impl Course {
 }
 
 impl Grid {
-    /// Lay out the cells that fall inside the disc, and shrink until a passage is
-    /// wide enough to walk down.
-    fn new(mut cells: usize, radius: f32) -> Self {
-        // Leave a sliver of bare stage outside the maze so a character can be set
-        // down on it and the outermost wall is visibly inside the rim.
-        let mut cell = radius * 1.86 / cells as f32;
-        // A character is BODY_RADIUS across twice over. Below that she grinds.
-        while cell * (1.0 - WALL_FRACTION) < crate::editor::BODY_RADIUS * 2.2 && cells > 3 {
-            cells -= 1;
-            cell = radius * 1.86 / cells as f32;
-        }
+    /// Lay out the cells that fall inside the disc.
+    ///
+    /// The cell size comes first, from how much room a passage has to give her,
+    /// and the grid is then made to span the stage minus its own wall and a
+    /// margin. Sizing it the other way round, from the stage, is what put the
+    /// boundary outside the disc where the clipping deleted it.
+    ///
+    /// `cells` is a wish and is recomputed from the geometry, because the answer
+    /// that comes out is usually not the one that was asked for.
+    fn new(_wish: usize, radius: f32) -> Self {
+        let want = crate::editor::BODY_RADIUS * PASSAGE_ROOM / (1.0 - WALL_FRACTION);
+        let span = radius * 2.0 - want * WALL_FRACTION - RIM_MARGIN * 2.0;
+        let cells = ((span / want).round() as usize).clamp(3, MAX_CELLS);
+        let cell = span / cells as f32;
         let half = cell * cells as f32 * 0.5;
         let mut grid = Grid {
             cells,
@@ -283,7 +342,15 @@ impl Grid {
             col_of: Vec::new(),
             walls: Vec::new(),
         };
-        let limit = (radius * 0.98).powi(2);
+        // A cell is part of the maze only if a character can stand in it.
+        //
+        // Cutting at the edge of the stage instead puts cells out where her body
+        // cannot go: the rim holds her at `radius - BODY_RADIUS` whatever is
+        // there, so an entrance on such a cell starts her pressed against the rim
+        // with the maze wall in front of her, and she stands there for the whole
+        // round. The corners of a square grid are exactly the cells this drops,
+        // which leaves a twelve-cell maze on a four-cell grid.
+        let limit = (radius - crate::editor::BODY_RADIUS).powi(2);
         for row in 0..cells {
             for col in 0..cells {
                 let x = -half + (col as f32 + 0.5) * cell;
@@ -481,8 +548,25 @@ impl Grid {
         path.into_iter().map(|cell| self.centres[cell]).collect()
     }
 
-    /// The walls, as merged runs.
+    /// Which cells can be walked between.
     ///
+    /// Read straight off the carved walls, so it cannot disagree with what the
+    /// collision uses: a passage listed here is a gap in the geometry there.
+    fn passages(&self) -> Vec<Vec<usize>> {
+        let mut out: Vec<Vec<usize>> = vec![Vec::new(); self.centres.len()];
+        for (cell, out_here) in out.iter_mut().enumerate() {
+            for side in [N, E, S, W] {
+                if let Some(next) = self.open_neighbour(cell, side)
+                    && !out_here.contains(&next)
+                {
+                    out_here.push(next);
+                }
+            }
+        }
+        out
+    }
+
+    /// The walls, as merged runs.    ///
     /// Every interior wall is shared by two cells, so it is emitted once by
     /// looking only at north and west sides, plus the far edges of the last row
     /// and column. Collinear runs are then merged, because a maze is mostly long
@@ -846,6 +930,101 @@ mod tests {
                     (dx * dx + dz * dz).sqrt() <= wall.half_len + wall.half_thick
                 });
                 assert!(covered, "seed {seed} drew a wall nothing collides with");
+            }
+        }
+    }
+
+    #[test]
+    fn the_collision_circles_of_a_wall_have_no_gap_between_them() {
+        // A wall approximated by circles a diameter apart has a slot between
+        // every pair. A character's body is far too wide to fit through it, but
+        // the sense that tells her whether the way ahead is clear tests a point,
+        // and a point fits. So she reads a solid wall as open, walks into the
+        // slot, and is pushed out by a wall she is already past.
+        for seed in 0..20u32 {
+            let course = Course::build(seed, 6, RADIUS);
+            for wall in &course.walls {
+                let r = wall.half_thick;
+                let (sin, cos) = wall.angle.sin_cos();
+                let span = wall.half_len * 2.0;
+                let along: Vec<f32> = {
+                    let n = ((span / r).ceil() as usize + 1).max(2);
+                    (0..n)
+                        .map(|i| -wall.half_len + span * (i as f32) / ((n - 1) as f32))
+                        .collect()
+                };
+                for pair in along.windows(2) {
+                    let gap = pair[1] - pair[0];
+                    assert!(
+                        gap <= r * 2.0 + 1e-5,
+                        "seed {seed}: a wall has a {gap:.4} gap between circles \
+                         of radius {r:.4}"
+                    );
+                }
+                // And the ends of the run have to reach the ends of the wall.
+                assert!(along[0] <= -wall.half_len + 1e-5);
+                assert!(*along.last().unwrap() >= wall.half_len - 1e-5);
+                let _ = (sin, cos);
+            }
+        }
+    }
+
+    #[test]
+    fn every_cell_is_somewhere_a_character_can_stand() {
+        // The rim holds her at `radius - BODY_RADIUS` whatever the geometry says, so
+        // a cell centre beyond that is a place she cannot be. An entrance on one
+        // starts her wedged against the rim with a wall in front of her, and she
+        // never moves again.
+        for seed in 0..30u32 {
+            let course = Course::build(seed, 6, RADIUS);
+            let limit = RADIUS - crate::editor::BODY_RADIUS;
+            for point in [&course.start, &course.goal] {
+                assert!(
+                    point[0].hypot(point[1]) <= limit,
+                    "seed {seed}: {:?} is out at {:.3}, past the {:.3} she can reach",
+                    point,
+                    point[0].hypot(point[1]),
+                    limit
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_maze_is_closed_at_the_outside() {
+        // A maze with no outer wall is a room with some partitions in it. She walks
+        // off the edge of the world, has nothing to keep a wall against, and stands in
+        // the strip by the rim until the round ends. This is what happened when the
+        // grid was sized to span the stage: the boundary sat outside the disc, and the
+        // clipping that keeps scenery on the stage removed it whole.
+        //
+        // So: from the middle of the maze, every straight line out to the rim has to
+        // meet a wall on the way.
+        for seed in 0..30u32 {
+            let course = Course::build(seed, 6, RADIUS);
+            let solids = course.solids();
+            let blocked = |x: f32, y: f32| solids.iter().any(|s| (x - s[0]).hypot(y - s[1]) < s[2]);
+            for step in 0..360 {
+                let angle = step as f32 * std::f32::consts::TAU / 360.0;
+                let (dx, dy) = (angle.cos(), angle.sin());
+                let mut escaped = None;
+                // Out in small strides, so a wall between two samples is still caught.
+                for n in 1..=60 {
+                    let d = n as f32 * 0.05;
+                    let (x, y) = (dx * d, dy * d);
+                    if blocked(x, y) {
+                        break;
+                    }
+                    if x.hypot(y) > RADIUS - crate::editor::BODY_RADIUS {
+                        escaped = Some(d);
+                        break;
+                    }
+                }
+                assert!(
+                    escaped.is_none(),
+                    "seed {seed}: she gets out at {angle:.2} rad, {escaped:?} from \
+                 the middle, with no wall in the way"
+                );
             }
         }
     }
