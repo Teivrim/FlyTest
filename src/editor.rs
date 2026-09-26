@@ -501,6 +501,8 @@ pub struct EditorSnapshot {
     pub agents: Vec<AgentSnapshot>,
     /// One course per act; they are all on screen at once.
     pub courses: Vec<CourseSnapshot>,
+    /// Whether the troupe is being moved on by itself.
+    pub auto: bool,
     pub acts: Vec<ActSnapshot>,
     pub training: TrainingSnapshot,
     pub brain: Option<BrainSnapshot>,
@@ -1930,6 +1932,13 @@ pub struct EditorRuntime {
     acts: Vec<usize>,
     /// The act the runtime is broadcasting to.
     current_act: usize,
+    /// Whether the troupe is being moved on by itself.
+    ///
+    /// Left alone, three flies stand on one hill for ever while a village, a city,
+    /// a forest and ruins are built around them and never visited. With this on,
+    /// every round sends each character to the next place, so the mazes are taken
+    /// in turn instead of being scenery.
+    auto: bool,
     /// Epsilon for exploration while training.
     epsilon: f32,
     /// Learning rate as a multiple of the core's default, applied to every fly.
@@ -2262,6 +2271,7 @@ impl EditorRuntime {
                 .collect(),
             acts: vec![0; count],
             current_act: 0,
+            auto: false,
             epsilon: 0.25,
             learn_rate: 1.0,
             trial_interval: 0.9,
@@ -3442,6 +3452,30 @@ impl EditorRuntime {
         }
     }
 
+    /// Send every character to the next place, and take the circus with them.
+    ///
+    /// Round-robin rather than all together, so a troupe of three is spread over
+    /// three mazes and each of them is working on something different. Sent in the
+    /// same order every time, which is what makes it a rotation and not a shuffle.
+    fn move_on(&mut self) {
+        if !self.auto || ACTS.is_empty() {
+            return;
+        }
+        for index in 0..self.agents.len() {
+            // The character's own index is in the step, not just the district they
+            // are in. Three flies all start on the hill, so a plain `+1` walks them
+            // into the next place together and keeps them together for ever: three
+            // flies, one maze, and two of the world's five districts still nobody
+            // has been in. Stepping by the index as well spreads them on the first
+            // move and keeps them spread.
+            let next = (self.acts[index] + 1 + index) % ACTS.len();
+            self.send_to_act(index, next);
+        }
+        // Follow whoever is furthest into the rotation, so the camera and the
+        // panel go where the leader went.
+        self.current_act = self.acts.first().copied().unwrap_or(0);
+    }
+
     /// Close the round, score it, and build the next one.
     fn end_round(&mut self, everyone_ate: bool) {
         for index in 0..self.agents.len() {
@@ -3475,6 +3509,7 @@ impl EditorRuntime {
             .wrapping_mul(1_664_525)
             .wrapping_add(1_013_904_223);
         self.build_courses(next);
+        self.move_on();
     }
 
     pub fn snapshot(&self, fps: f32) -> EditorSnapshot {
@@ -3551,6 +3586,7 @@ impl EditorRuntime {
             selected_fly: self.selected,
             agents,
             courses: self.course_snapshot(),
+            auto: self.auto,
             acts: self.act_snapshots(),
             training: TrainingSnapshot {
                 enabled: self.training,
@@ -3631,6 +3667,23 @@ impl EditorRuntime {
                     self.learning_updates = self.learning_updates.saturating_add(1);
                 }
             }
+            // Whether the troupe moves on by itself. A round is enough of a cadence
+            // for it, and using the round means they change place when they have
+            // finished something rather than at an arbitrary moment.
+            "auto" => {
+                self.auto = command.enabled.unwrap_or(!self.auto);
+                let on = self.auto;
+                self.log(LogEntry {
+                    t: 0.0,
+                    fly: 0,
+                    kind: "auto".to_owned(),
+                    text: if on {
+                        "авто: траурта переезжает сама".to_owned()
+                    } else {
+                        "авто выключен".to_owned()
+                    },
+                });
+            }
             // Build a new course now, without waiting for the round to end. The
             // seed is optional, so a round can be asked for by number and
             // repeated exactly.
@@ -3642,6 +3695,11 @@ impl EditorRuntime {
                 self.round = self.round.saturating_add(1).max(1);
                 self.round_time = ROUND_LENGTH;
                 self.build_courses(seed);
+                // Asking for a new course is asking to move on, and in auto that is
+                // the whole point of the switch. Without this the button rebuilt the
+                // maze under their feet and left them standing on the same spot, so
+                // auto looked broken while the round was busy running on its own.
+                self.move_on();
                 self.log(LogEntry {
                     t: 0.0,
                     fly: 0,
@@ -4781,6 +4839,55 @@ mod tests {
             best > 0,
             "nobody found so much as one mouthful in {COURSE_BUDGET} s"
         );
+    }
+
+    #[test]
+    fn auto_mode_walks_the_troupe_through_the_world() {
+        // Left alone they stand on the hill for ever while a village, a city, a
+        // forest and ruins are built around them and never visited. With auto on,
+        // every round moves each character to the next place.
+        let mut runtime = EditorRuntime::new(3);
+        assert!(!runtime.snapshot(60.0).auto, "auto starts off");
+        let start: Vec<usize> = runtime.acts.clone();
+        runtime
+            .apply_command(br#"{"action":"auto","enabled":true}"#)
+            .expect("auto");
+        assert!(runtime.snapshot(60.0).auto, "auto did not take");
+
+        // Three rounds is enough to go most of the way round.
+        for _ in 0..3 {
+            runtime.round_time = 0.001;
+            runtime.step(FIXED_DT);
+        }
+        let after: Vec<usize> = runtime.acts.clone();
+        let n = ACTS.len();
+        for (index, (was, now)) in start.iter().zip(after.iter()).enumerate() {
+            assert_eq!(
+                *now,
+                (was + 3 * (1 + index)) % n,
+                "a character was not moved on once a round"
+            );
+        }
+        // And they must be spread out, not all in one place, or there is no point
+        // in three of them.
+        let mut places = after.clone();
+        places.sort_unstable();
+        places.dedup();
+        assert!(
+            places.len() >= 2,
+            "the whole troupe ended up in the same district: {after:?}"
+        );
+    }
+
+    #[test]
+    fn auto_mode_off_leaves_them_where_they_are() {
+        let mut runtime = EditorRuntime::new(3);
+        let start: Vec<usize> = runtime.acts.clone();
+        for _ in 0..3 {
+            runtime.round_time = 0.001;
+            runtime.step(FIXED_DT);
+        }
+        assert_eq!(runtime.acts, start, "the troupe moved with auto off");
     }
 
     #[test]

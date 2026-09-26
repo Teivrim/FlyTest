@@ -96,20 +96,20 @@ function buildTent() {
   stripeTexture.repeat.set(4, 1);
 
   const canopy = new THREE.Mesh(
-    new THREE.ConeGeometry(11.5, 6.4, 32, 1, true),
+    new THREE.ConeGeometry(24, 8.5, 20, 1, true),
     new THREE.MeshStandardMaterial({ map: stripeTexture, side: THREE.BackSide, roughness: 0.85 })
   );
-  canopy.position.y = 3.3;
+  canopy.position.y = 4.4;
   tent.add(canopy);
 
   // A crown finial so the tent has a readable top from a low camera.
-  const finial = new THREE.Mesh(new THREE.SphereGeometry(0.32, 16, 12), material('#ffd76b', '#ff9f43', 0.6));
-  finial.position.y = 6.6;
+  const finial = new THREE.Mesh(new THREE.SphereGeometry(0.32, 10, 7), material('#ffd76b', '#ff9f43', 0.6));
+  finial.position.y = 8.6;
   tent.add(finial);
 
   // Proscenium arch at the front, facing the default camera.
-  const arch = new THREE.Mesh(new THREE.TorusGeometry(3.2, 0.14, 10, 48, Math.PI), material('#ffd76b', '#ff9f43', 0.35));
-  arch.position.set(0, 3.2, 5.2);
+  const arch = new THREE.Mesh(new THREE.TorusGeometry(4.0, 0.16, 6, 24, Math.PI), material('#ffd76b', '#ff9f43', 0.35));
+  arch.position.set(0, 4.0, 7.0);
   tent.add(arch);
 
   arenaGroup.add(tent);
@@ -130,33 +130,46 @@ function buildBanner() {
   ctx.fillText('THE AMAZING DIGITAL CIRCUS', 512, 66);
   const texture = new THREE.CanvasTexture(canvas);
   const banner = new THREE.Mesh(
-    new THREE.PlaneGeometry(9.2, 1.15),
+    new THREE.PlaneGeometry(12, 1.5),
     new THREE.MeshBasicMaterial({ map: texture, transparent: true, side: THREE.DoubleSide })
   );
-  banner.position.set(0, 4.35, 4.4);
+  banner.position.set(0, 5.5, 6.0);
   arenaGroup.add(banner);
   return banner;
 }
 
 function buildSeatRing() {
-  const seats = new THREE.Group();
+  // Instanced, for the same reason the maze walls are: seventy-one chairs as
+  // seventy-one meshes is seventy-one draw calls to paint some seating.
   const rows = 3;
+  const count = rows * 32;
+  const seats = new THREE.InstancedMesh(
+    new THREE.BoxGeometry(0.3, 0.34, 0.3),
+    material('#3a1730', '#000000', 0),
+    count
+  );
+  const matrix = new THREE.Matrix4();
+  const at = new THREE.Vector3();
+  const turn = new THREE.Quaternion();
+  const up = new THREE.Vector3(0, 1, 0);
+  const one = new THREE.Vector3(1, 1, 1);
+  let n = 0;
   for (let row = 0; row < rows; row++) {
-    const radius = 8.0 + row * 0.85;
-    const count = 22 + row * 6;
-    for (let i = 0; i < count; i++) {
-      const angle = (i / count) * Math.PI * 2;
+    const radius = 12.5 + row * 1.0;
+    const perRow = 22 + row * 5;
+    for (let i = 0; i < perRow; i++) {
+      const angle = (i / perRow) * Math.PI * 2;
       // Leave a gap at the front so the camera can see into the ring.
       if (Math.abs(Math.atan2(Math.sin(angle), Math.cos(angle))) < 0.45) continue;
-      const chair = new THREE.Mesh(
-        new THREE.BoxGeometry(0.3, 0.34, 0.3),
-        material(row === 0 ? '#5c2340' : '#3a1730', '#000000', 0)
-      );
-      chair.position.set(Math.cos(angle) * radius, 0.18 + row * 0.42, Math.sin(angle) * radius);
-      chair.lookAt(0, chair.position.y, 0);
-      seats.add(chair);
+      if (n >= count) break;
+      at.set(Math.cos(angle) * radius, 0.18 + row * 0.42, Math.sin(angle) * radius);
+      turn.setFromAxisAngle(up, -angle + Math.PI / 2);
+      matrix.compose(at, turn, one);
+      seats.setMatrixAt(n++, matrix);
     }
   }
+  seats.count = n;
+  seats.instanceMatrix.needsUpdate = true;
   arenaGroup.add(seats);
   return seats;
 }
@@ -198,7 +211,7 @@ function buildActStage(act) {
 
   // A raised disc, tinted with the act colour.
   const disc = new THREE.Mesh(
-    new THREE.CylinderGeometry(stageRadius, stageRadius * 1.088, stageHeight, 40),
+    new THREE.CylinderGeometry(stageRadius, stageRadius * 1.088, stageHeight, 28),
     material('#141d2c', act.color, 0.18)
   );
   disc.position.y = stageHeight * 0.5;
@@ -207,7 +220,7 @@ function buildActStage(act) {
 
   // A low wall of light marking the stage edge.
   const rim = new THREE.Mesh(
-    new THREE.TorusGeometry(stageRadius + 0.02, 0.045, 8, 48),
+    new THREE.TorusGeometry(stageRadius + 0.02, 0.045, 5, 30),
     new THREE.MeshBasicMaterial({ color: act.color, transparent: true, opacity: 0.75 })
   );
   rim.rotation.x = Math.PI / 2;
@@ -315,53 +328,63 @@ function animateActStages() {
 
 function buildArena() {
   arenaGroup = new THREE.Group(); scene.add(arenaGroup);
-  const floor = new THREE.Mesh(new THREE.CircleGeometry(10.6, 96), material('#0d1522'));
+
+  // The ground has to reach past the furthest district, which is thirteen out plus
+  // a radius of five. It was ten, and the districts have since spread out past it,
+  // so the floor stopped somewhere in the middle of the city.
+  const floor = new THREE.Mesh(new THREE.CircleGeometry(23, 40), material('#0d1522'));
   floor.rotation.x = -Math.PI / 2; floor.receiveShadow = true; arenaGroup.add(floor);
-  const grid = new THREE.GridHelper(20, 40, '#1d3348', '#121f2e'); grid.position.y = 0.012; arenaGroup.add(grid);
+  const grid = new THREE.GridHelper(44, 22, '#1d3348', '#121f2e'); grid.position.y = 0.012; arenaGroup.add(grid);
 
-  // Central circus ring, brighter than the surrounding floor.
-  const ring = new THREE.Mesh(new THREE.CircleGeometry(4.2, 64), material('#1a1030', '#ff5c7a', 0.12));
-  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.02; arenaGroup.add(ring);
-  const ringMaterial = new THREE.MeshBasicMaterial({ color: '#ff5c7a', transparent: true, opacity: 0.55 });
-  [2.1, 4.25, 4.35].forEach((radius, index) => {
-    const r = new THREE.Mesh(new THREE.TorusGeometry(radius, index === 1 ? 0.03 : 0.014, 8, 96), ringMaterial.clone());
-    r.rotation.x = Math.PI / 2; r.position.y = 0.035 + index * 0.006; arenaGroup.add(r);
-  });
-  const center = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.85, 0.12, 32), material('#1b3044', '#54d7e8', 0.25));
-  center.position.y = 0.08; center.castShadow = true; arenaGroup.add(center);
+  // The central circus ring is gone. It was three decorative toruses of about
+  // fifteen hundred triangles each, lying on the floor of a circus that no longer
+  // exists, and the hill's maze is now built on exactly that spot: the heaviest
+  // decoration in the scene, and scenery in the way.
+  const center = new THREE.Mesh(new THREE.CylinderGeometry(0.7, 0.85, 0.12, 20), material('#1b3044', '#54d7e8', 0.25));
+  center.position.y = 0.08; arenaGroup.add(center);
 
-  sensorGroup = new THREE.Group(); arenaGroup.add(sensorGroup);
+  // The tree a fly wakes up under, on the hill. It is the one thing on the hill
+  // she can walk into, and the landmark the world is measured from.
+  const tree = new THREE.Group();
+  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.24, 1.5, 8), material('#4a3524'));
+  trunk.position.y = 0.75;
+  const crown = new THREE.Mesh(new THREE.SphereGeometry(0.95, 12, 9), material('#3f7a3f'));
+  crown.position.y = 1.95; crown.scale.set(1, 0.85, 1);
+  const bough = new THREE.Mesh(new THREE.SphereGeometry(0.62, 10, 8), material('#4c8a4a'));
+  bough.position.set(0.5, 1.6, 0.32);
+  tree.add(trunk, crown, bough);
+  tree.position.set(1.9, 0, -1.4);
+  tree.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+  arenaGroup.add(tree);
 
-  // Circus dressing, built before the act stages so the stages sit on top.
   buildTent();
   buildBanner();
   buildSeatRing();
-  spotlights = buildSpotlights();
+  buildSpotlights();
 
-  // Stage scenery for all five acts, whether or not data has arrived yet.
+  // Stage scenery for all five districts, whether or not data has arrived yet.
   const fallback = [
-    { id: 'main_stage', name: 'Главная арена', color: '#ff5c7a', origin: [0, 0] },
-    { id: 'labyrinth', name: 'Лабиринт', color: '#54d7e8', origin: [6.4, 0] },
-    { id: 'garden', name: 'Чародейный сад', color: '#8ce06a', origin: [0, 6] },
-    { id: 'factory', name: 'Фабрика чудес', color: '#ffb86b', origin: [-6.4, 0] },
-    { id: 'void', name: 'Пустота', color: '#a98bff', origin: [0, -6] },
+    { id: 'hill', name: 'Холм', color: '#8ce06a', origin: [0, 0] },
+    { id: 'village', name: 'Деревня', color: '#ffb86b', origin: [13, 0] },
+    { id: 'city', name: 'Город', color: '#54d7e8', origin: [0, 15] },
+    { id: 'forest', name: 'Лес', color: '#a98bff', origin: [-13, 0] },
+    { id: 'ruins', name: 'Руины', color: '#ff5c7a', origin: [0, -15] },
   ];
   for (const act of fallback) if (!actStages.has(act.id)) buildActStage(act);
   if (state.data) syncActStages();
 
-  // Keep the starfield, but push it out past the tent.
+  // The starfield, pushed out past the districts.
   const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: '#8ea8ca', size: 0.035, transparent: true, opacity: 0.5 }));
   const starPositions = [];
   for (let i = 0; i < 220; i++) {
     const angle = Math.random() * Math.PI * 2;
-    const radius = 14 + Math.random() * 10;
+    const radius = 26 + Math.random() * 12;
     starPositions.push(Math.cos(angle) * radius, 1.5 + Math.random() * 9, Math.sin(angle) * radius);
   }
   points.geometry.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3));
   arenaGroup.add(points);
 }
 
-// Recolour and relabel the stages once the server has told us the real acts.
 function syncActStages() {
   if (!state.data || !state.data.acts) return;
   for (const act of state.data.acts) {
@@ -1190,27 +1213,47 @@ function drawCourses() {
         }
         scene.remove(scenery);
       }
-      scenery = new THREE.Group();
-      scenery.userData.key = key;
-      for (const wall of course.walls) {
-        // Standing on the stage top, not inside the stage.
+        // One instanced mesh for the whole maze, not one mesh per wall.
         //
-        // The stage is a raised disc: its top is at `stage_height` above the tent
-        // floor, and a wall whose centre is placed at the floor ends up entirely
-        // under the disc. Which is where they were, and the disc hid every one of
-        // them, so the maze was drawn, collided with, and invisible.
-        const tall = Math.max(0.18, height * 1.3);
-        const slab = new THREE.Mesh(
-          new THREE.BoxGeometry(wall.half_len * 2, tall, wall.half_thick * 2),
-          material('#2c3d59', act.color, 0.45)
-        );
-        slab.position.set(ox + wall.x, height + tall * 0.5, oz + wall.z);
-        slab.rotation.y = -wall.angle;
-        slab.castShadow = true;
-        slab.receiveShadow = true;
-        scenery.add(slab);
-      }
-      scene.add(scenery);
+        // Sixty-seven walls as sixty-seven meshes is sixty-seven draw calls to
+        // paint a maze, and the scene was issuing six hundred and twenty of them
+        // for sixty-four thousand triangles: it was bound by draw calls, not by
+        // geometry. The walls are one box differing only in size and angle, which
+        // is exactly what an instanced mesh is for.
+        scenery = new THREE.Group();
+        scenery.userData.key = key;
+        if (course.walls.length) {
+          // Height stays in the geometry so every instance is the same shape, and
+          // the walls stand on the district's ground rather than inside it: a
+          // stage is a raised disc and a wall centred at the floor is under it,
+          // which is where they were, and the disc hid every one.
+          const tall = Math.max(0.18, height * 1.3);
+          const walls = new THREE.InstancedMesh(
+            new THREE.BoxGeometry(1, tall, 1),
+            material('#2c3d59', act.color, 0.45),
+            course.walls.length
+          );
+          const matrix = new THREE.Matrix4();
+          const at = new THREE.Vector3();
+          const turn = new THREE.Quaternion();
+          const up = new THREE.Vector3(0, 1, 0);
+          const size = new THREE.Vector3();
+          course.walls.forEach((wall, i) => {
+            at.set(ox + wall.x, height + tall * 0.5, oz + wall.z);
+            turn.setFromAxisAngle(up, -wall.angle);
+            size.set(wall.half_len * 2, 1, wall.half_thick * 2);
+            matrix.compose(at, turn, size);
+            walls.setMatrixAt(i, matrix);
+          });
+          walls.instanceMatrix.needsUpdate = true;
+          walls.receiveShadow = true;
+          // Not a shadow caster. Seventy thin walls each drawing into the shadow
+          // map is a second scene's worth of draw calls, for shadows that fall
+          // between walls nobody can see.
+          walls.castShadow = false;
+          scenery.add(walls);
+        }
+        scene.add(scenery);
       courseScenery.set(course.act, scenery);
 
       // Every food in the maze, and a ring under each so it reads from across
@@ -1351,6 +1394,10 @@ function renderPanels() {
   $('course-count').textContent = `${best} / ${total}`;
   $('course-time').value = Math.max(0, Math.min(1, (course.time_left || 0) / (course.round_length || 1)));
   $('course-seed').textContent = `лабиринт seed ${course.seed || 0} · длина хода ${(course.path_length || 0).toFixed(1)}`;
+  const auto = !!data.auto;
+  const autoButton = $('auto-button');
+  autoButton.textContent = auto ? 'Авто: вкл' : 'Авто: выкл';
+  autoButton.classList.toggle('on', auto);
   $('strategy-value').textContent = agent.strategy; $('reward-value').textContent = `${Math.round(agent.reward * 100)}%`; $('novelty-value').textContent = `${Math.round(agent.novelty * 100)}%`; $('puff-value').textContent = `${agent.puff_count} (${data.metrics.total_puff_events})`; $('learning-value').textContent = String(data.metrics.learning_updates);
   renderActs(data);
   renderBrain(data);
