@@ -28,7 +28,7 @@ function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => 
 
 function init3D() {
   if (!window.THREE) {
-    $('status-text').textContent = 'WebGL/Three.js недоступен';
+    $('status-text').textContent = 'WebGL/Three.js Р Р…Р ВµР Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р ВµР Р…';
     return false;
   }
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -321,11 +321,11 @@ function buildArena() {
 
   // Stage scenery for all five acts, whether or not data has arrived yet.
   const fallback = [
-    { id: 'main_stage', name: 'Главная арена', color: '#ff5c7a', origin: [0, 0] },
-    { id: 'labyrinth', name: 'Лабиринт', color: '#54d7e8', origin: [6.4, 0] },
-    { id: 'garden', name: 'Чародейный сад', color: '#8ce06a', origin: [0, 6] },
-    { id: 'factory', name: 'Фабрика чудес', color: '#ffb86b', origin: [-6.4, 0] },
-    { id: 'void', name: 'Пустота', color: '#a98bff', origin: [0, -6] },
+    { id: 'main_stage', name: 'Р вЂњР В»Р В°Р Р†Р Р…Р В°РЎРЏ Р В°РЎР‚Р ВµР Р…Р В°', color: '#ff5c7a', origin: [0, 0] },
+    { id: 'labyrinth', name: 'Р вЂєР В°Р В±Р С‘РЎР‚Р С‘Р Р…РЎвЂљ', color: '#54d7e8', origin: [6.4, 0] },
+    { id: 'garden', name: 'Р В§Р В°РЎР‚Р С•Р Т‘Р ВµР в„–Р Р…РЎвЂ№Р в„– РЎРѓР В°Р Т‘', color: '#8ce06a', origin: [0, 6] },
+    { id: 'factory', name: 'Р В¤Р В°Р В±РЎР‚Р С‘Р С”Р В° РЎвЂЎРЎС“Р Т‘Р ВµРЎРѓ', color: '#ffb86b', origin: [-6.4, 0] },
+    { id: 'void', name: 'Р СџРЎС“РЎРѓРЎвЂљР С•РЎвЂљР В°', color: '#a98bff', origin: [0, -6] },
   ];
   for (const act of fallback) if (!actStages.has(act.id)) buildActStage(act);
   if (state.data) syncActStages();
@@ -499,6 +499,37 @@ const HAIR_COLORS = ['#ff6fa5', '#8ce0ff', '#c9a6ff', '#ffd76b', '#7dffc4', '#ff
 const SKIN = '#ffe0cf';
 const OUTFITS = ['#ff5c7a', '#54d7e8', '#a98bff', '#8ce06a', '#ffb86b'];
 
+/*
+ * Limb proportions, in world units.
+ *
+ * These are the single source of truth. The meshes are built from them and the
+ * floor contact is calculated from them, so the two cannot drift apart the way
+ * a hard-coded rig height and a hard-coded leg length eventually do.
+ *
+ * `thigh` and `shin` are also sent to the model, which knows the joint angles
+ * but not how long anyone's bones are.
+ */
+const RIG = {
+  leg: {
+    thigh: 0.10,
+    shin: 0.10,
+    // The sole as an ellipsoid hung below the ankle: how far its centre sits,
+    // its vertical semi-axis, and its depth semi-axis. The depth is the long
+    // one, and it is what makes a point approximation wrong.
+    soleC: 0.017,
+    soleA: 0.032 * 0.6,
+    soleB: 0.032 * 1.35,
+    // How far the sole's centre sits ahead of the ankle. A shoe is mounted
+    // forward, and that offset swings it down as the ankle tilts, which is
+    // what stops a merely tilted leg from sinking into the floor.
+    soleF: 0.020,
+    // Where the hip pivot sits relative to the rig root. The root is the floor
+    // contact point, so the body hangs above it by this much.
+    hipHeight: 0.035,
+  },
+  arm: { upper: 0.075, fore: 0.068, splay: 0.0 },
+};
+
 function createFlyVisual(agent) {
   const group = new THREE.Group();
   const index = agent.id - 1;
@@ -667,46 +698,94 @@ function createFlyVisual(agent) {
   rightWing.rotation.set(0.2, -0.5, -1.15);
   torso.add(rightWing);
 
-  // ---- arms ----
-  // Each arm hangs from a shoulder pivot rather than spinning about its own
-  // middle. The difference is the whole range of the gesture: pivoting at the
-  // shoulder can raise an arm above the head, and pivoting at the middle can
-  // only wobble it.
-  const armGeometry = new THREE.CapsuleGeometry(0.022, 0.11, 4, 8);
+  // ---- arms: shoulder, elbow, wrist ----
+  // A chain of pivots, not one mesh. A single capsule can swing from the
+  // shoulder and that is all it can do, so an arm is either straight or
+  // rigidly waved. With a real elbow the forearm can fold in, which is the
+  // difference between reaching out and pulling somebody closer.
+  //
+  // Every segment hangs below its own pivot, so a rotation at a joint moves
+  // the whole limb beyond it. Segment lengths live in RIG so the floor
+  // calculation and the geometry cannot drift apart.
+  const armGeometry = new THREE.CapsuleGeometry(0.020, 0.062, 4, 8);
   function makeArm(sign) {
-    const pivot = new THREE.Group();
-    pivot.position.set(sign * 0.105, 0.20, 0.01);
-    pivot.rotation.z = -sign * 0.22;
-    const arm = new THREE.Mesh(armGeometry, material(SKIN));
-    // Hang below the pivot, so a rotation swings the arm from the shoulder.
-    arm.position.y = -0.075;
-    pivot.add(arm);
-    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.026, 8, 6), material(SKIN));
-    hand.position.y = -0.155;
-    pivot.add(hand);
-    return pivot;
+    const shoulder = new THREE.Group();
+    shoulder.position.set(sign * (0.105 + 0.02 * RIG.arm.splay), 0.20, 0.01);
+    shoulder.rotation.z = -sign * 0.22;
+
+    const upper = new THREE.Mesh(armGeometry, material(SKIN));
+    upper.position.y = -RIG.arm.upper * 0.5;
+    shoulder.add(upper);
+
+    const elbow = new THREE.Group();
+    elbow.position.y = -RIG.arm.upper;
+    shoulder.add(elbow);
+
+    const fore = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.017, 0.052, 4, 8),
+      material(SKIN)
+    );
+    fore.position.y = -RIG.arm.fore * 0.5;
+    elbow.add(fore);
+
+    const wrist = new THREE.Group();
+    wrist.position.y = -RIG.arm.fore;
+    elbow.add(wrist);
+
+    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.024, 8, 6), material(SKIN));
+    hand.scale.set(0.85, 1.15, 0.7);
+    hand.position.y = -0.022;
+    wrist.add(hand);
+
+    return { shoulder, elbow, wrist };
   }
-  const armL = makeArm(-1);
-  const armR = makeArm(1);
+  const armChainL = makeArm(-1);
+  const armChainR = makeArm(1);
+  const armL = armChainL.shoulder;
+  const armR = armChainR.shoulder;
   torso.add(armL);
   torso.add(armR);
 
-  // ---- legs: the part being learned ----
-  const legGeometry = new THREE.CapsuleGeometry(0.028, 0.13, 4, 8);
+  // ---- legs: hip, knee, ankle ----
+  // The part being learned, so it gets the most joints.
+  const thighGeometry = new THREE.CapsuleGeometry(0.026, RIG.leg.thigh - 0.052, 4, 8);
+  const shinGeometry = new THREE.CapsuleGeometry(0.022, RIG.leg.shin - 0.044, 4, 8);
   const shoeMaterial = material(outfit, outfit, 0.2);
-  function makeLeg() {
-    const pivot = new THREE.Group();
-    const upper = new THREE.Mesh(legGeometry, material(SKIN));
-    upper.position.y = -0.09;
-    pivot.add(upper);
-    const shoe = new THREE.Mesh(new THREE.SphereGeometry(0.034, 10, 8), shoeMaterial);
-    shoe.scale.set(0.85, 0.6, 1.25);
-    shoe.position.set(0, -0.175, 0.018);
-    pivot.add(shoe);
-    return pivot;
+  function makeLeg(sign) {
+    const hip = new THREE.Group();
+    hip.position.set(sign * 0.055, 0.035, 0);
+
+    const thigh = new THREE.Mesh(thighGeometry, material(SKIN));
+    thigh.position.y = -RIG.leg.thigh * 0.5;
+    hip.add(thigh);
+
+    const knee = new THREE.Group();
+    knee.position.y = -RIG.leg.thigh;
+    hip.add(knee);
+
+    const shin = new THREE.Mesh(shinGeometry, material(SKIN));
+    shin.position.y = -RIG.leg.shin * 0.5;
+    knee.add(shin);
+
+    const ankle = new THREE.Group();
+    ankle.position.y = -RIG.leg.shin;
+    knee.add(ankle);
+
+    const shoe = new THREE.Mesh(new THREE.SphereGeometry(0.032, 10, 8), shoeMaterial);
+    shoe.scale.set(0.85, 0.6, 1.35);
+    // Sit the shoe so its centre is exactly RIG.leg.soleC below the ankle; the
+    // floor calculation then works out where its underside actually lands.
+    shoe.position.set(0, -RIG.leg.soleC, RIG.leg.soleF);
+    ankle.add(shoe);
+
+    return { hip, knee, ankle };
   }
-  const legL = makeLeg(); legL.position.set(-0.055, 0.035, 0); rig.add(legL);
-  const legR = makeLeg(); legR.position.set(0.055, 0.035, 0); rig.add(legR);
+  const legChainL = makeLeg(-1);
+  const legChainR = makeLeg(1);
+  const legL = legChainL.hip;
+  const legR = legChainR.hip;
+  rig.add(legL);
+  rig.add(legR);
 
   const selection = new THREE.Mesh(
     new THREE.TorusGeometry(0.26, 0.014, 8, 36),
@@ -736,6 +815,7 @@ function createFlyVisual(agent) {
     agentId: agent.id, body, head, face, hair, outfit, rig,
     torso, neck, hairSwing,
     leftWing, rightWing, armL, armR, legL, legR,
+    armChainL, armChainR, legChainL, legChainR,
     selection, label, puffGroup,
     eyes: [eyeL, eyeR], brows: [browL, browR], mouth: mouthMesh, lip,
     blushes: [blushL, blushR], tears: [tearL, tearR], sweatDrop,
@@ -759,8 +839,8 @@ function syncScene() {
   state.data.agents.forEach((agent, index) => {
     let visual = flyVisuals.get(agent.id); if (!visual) { visual = createFlyVisual(agent); flyVisuals.set(agent.id, visual); }
     const ud = visual.userData;
-    // These characters are on the ground. `height` is the body height above
-    // the floor, and the walk cycle adds its bob on top.
+    // These characters are on the ground. How high the body sits is decided
+    // further down, from where the feet actually are.
     const gait = agent.gait || {};
     const phase = gait.phase || 0;
     const speed = Math.hypot(agent.velocity[0], agent.velocity[1]);
@@ -774,10 +854,13 @@ function syncScene() {
     // Ease the turn so the figure does not snap between facings.
     visual.rotation.y += (heading - visual.rotation.y) * 0.25;
 
-    // Vertical bob at twice the step rate, which is what a walk actually is.
-    const bob = walking ? Math.abs(Math.sin(phase)) * 0.035 * stride : 0;
-    const crouch = (1 - balance) * 0.06;
-    ud.rig.position.y = (agent.height || 0) + bob - crouch;
+    // There is deliberately no vertical bob added to the root.
+    //
+    // It looks like an obvious thing to add and it is already there: the pelvis
+    // rises and falls during a walk because the stance knee flexes, and the
+    // root height is derived from the leg, so the oscillation is in the
+    // trajectory. Adding a sine on top counts it twice, and the feet leave the
+    // floor by most of a bob on every step.
 
     /* ---- layered pose ----
      * Every layer below only ever *adds* to this accumulator. Nothing writes
@@ -789,8 +872,13 @@ function syncScene() {
     const now = performance.now() * 0.001 + index;
 
     // Layer 1: the walk, which everything else is expressed against.
-    poseLegs(pose, walking ? Math.sin(phase) * 0.55 * stride : 0);
-    poseArms(pose, walking ? Math.sin(phase) * 0.35 * stride * (0.5 + 0.5 * agent.energy) : 0);
+    //
+    // The joint trajectory comes from the model, so the knees and elbows are
+    // its answer rather than a guess made here. There is deliberately no extra
+    // sine on the hips: that used to be layered on top, and the floor
+    // calculation could not see it, so the feet sank by a fifth of the
+    // character's height.
+    poseLimbs(pose, agent.limbs);
     // A little torso roll, growing with sway: an unstable walk looks unstable.
     pose.spineZ += Math.sin(phase) * 0.05 * sway;
     // The hip drops on the swing leg, which is most of what sells a walk.
@@ -820,34 +908,103 @@ function syncScene() {
     // Layer 3: the gesture, as an offset on top of the walk.
     poseGesture(pose, agent.social || {});
 
+    // Losing her balance makes her sink, and a real person sinks by bending
+    // the knees rather than by dropping through the floor. The root height is
+    // derived from these angles further down, so folding here shortens the leg
+    // and the body comes down with it, staying in contact.
+    if (balance < 0.999) {
+      const sink = (1 - balance) * 0.9;
+      pose.legKnee[0] += sink;
+      pose.legKnee[1] += sink;
+      pose.legAnkle[0] -= sink * 0.5;
+      pose.legAnkle[1] -= sink * 0.5;
+    }
+
     // Layer 4: the expression, mostly in the face but with a little in the
     // spine, because a smile that does not reach the shoulders reads as a
     // mask rather than a face.
     poseExpression(pose, agent.affect || [], agent.face || {}, now);
 
     // Now, and only now, the accumulator reaches the rig.
-    ud.legL.rotation.x = pose.legLx;
-    ud.legR.rotation.x = pose.legRx;
-    ud.legL.rotation.z = pose.legLz;
-    ud.legR.rotation.z = pose.legRz;
-    ud.armL.rotation.x = pose.armLx;
-    ud.armR.rotation.x = pose.armRx;
-    ud.armL.rotation.z = pose.armLz;
-    ud.armR.rotation.z = pose.armRz;
-    ud.torso.rotation.x = pose.spineX;
+    //
+    // Each chain is driven joint by joint. The old flat arm fields are folded
+    // in here rather than written directly, so a gesture that only knows about
+    // the shoulder still works on an arm that has an elbow.
+    const chains = [
+      { leg: ud.legChainL, arm: ud.armChainL, sign: -1 },
+      { leg: ud.legChainR, arm: ud.armChainR, sign: 1 },
+    ];
+    // Shoulders ride up and in when she is braced, and out when she is open.
+    const lift = pose.shoulder * 0.012;
+    for (let i = 0; i < 2; i++) {
+      const c = chains[i];
+      const flatLegX = i === 0 ? pose.legLx : pose.legRx;
+      const flatLegZ = i === 0 ? pose.legLz : pose.legRz;
+      const flatArmX = i === 0 ? pose.armLx : pose.armRx;
+      const flatArmZ = i === 0 ? pose.armLz : pose.armRz;
+
+      const hipAngle = pose.legRoot[i] + flatLegX;
+      c.leg.hip.rotation.x = hipAngle;
+      c.leg.hip.rotation.z = flatLegZ + pose.legSplay[i] * c.sign;
+      c.leg.knee.rotation.x = pose.legKnee[i];
+      // The model reports the ankle's *accumulated* angle, which is what the
+      // floor calculation uses. The joint here is local to the knee, so the
+      // two angles above have to come off again. Applying the accumulated value
+      // as a local one tips the foot by the whole hip and knee on top of itself,
+      // and the character walks with her toes through the floor.
+      c.leg.ankle.rotation.x = pose.legAnkle[i] - hipAngle - pose.legKnee[i];
+
+      c.arm.shoulder.rotation.x = pose.armRoot[i] + flatArmX;
+      c.arm.shoulder.rotation.z =
+        -c.sign * (0.22 - pose.shoulder * 0.18) + flatArmZ - pose.armSplay[i] * c.sign;
+      c.arm.shoulder.position.x = c.sign * (0.105 + 0.03 * pose.armSplay[i]);
+      c.arm.shoulder.position.y = 0.20 + lift;
+      c.arm.elbow.rotation.x = -pose.armElbow[i];
+      c.arm.wrist.rotation.x = pose.armWrist[i] - pose.armRoot[i] - pose.armElbow[i];
+    }
+
+    /* ---- standing on the floor ----
+     * The root sits at exactly the height that puts the lower foot on the
+     * floor, and the height is recomputed from the angles actually applied.
+     *
+     * A fixed root height cannot work. The foot rises during the swing and
+     * falls during the stance, so a constant height buries her to the ankle on
+     * the forward step and leaves her hovering on the back one. Nor can the
+     * drop be taken from the snapshot alone, because the crouch is a rendering
+     * term applied after the model has already answered: folding the knees
+     * shortens the leg, and the root has to come down with it.
+     *
+     * The hip roll has to be in here too. It rotates the whole body about the
+     * root, which shortens the leg's vertical reach by exactly cos(roll), so
+     * leaving it out slides the feet by a couple of centimetres at every
+     * stride. The forward lean is a different matter: it belongs on the torso,
+     * because a person leans from the waist and not from the floor.
+     *
+     * This mirrors TFootDrop in the core, which answers the same question from
+     * the model's own angles. A test asserts the two agree, so they cannot
+     * drift apart. */
+    {
+      const roll = pose.hipRoll;
+      // cos of a small roll, guarded so a degenerate value cannot divide out.
+      const upright = Math.max(0.2, Math.cos(roll));
+      const drop =
+        Math.min(
+          footDrop(pose.legRoot[0], pose.legKnee[0], pose.legAnkle[0]),
+          footDrop(pose.legRoot[1], pose.legKnee[1], pose.legAnkle[1])
+        ) / upright;
+      // The hip offset matters: `drop` is measured from the hip, and the hip
+      // sits above the rig root, so the root goes a little lower than the drop
+      // alone would suggest. Getting this wrong leaves the feet hovering.
+      ud.rig.position.y = -drop - RIG.leg.hipHeight;
+    }
+
+    ud.torso.rotation.x = pose.spineX + pose.lean;
     ud.torso.rotation.z = pose.spineZ;
     ud.torso.rotation.y = pose.spineY;
-    ud.rig.rotation.x = pose.lean;
-    ud.rig.rotation.z += pose.hipRoll;
+    ud.rig.rotation.z = pose.hipRoll;
     ud.neck.rotation.x = pose.neckX;
     ud.neck.rotation.y = pose.neckY;
     ud.neck.rotation.z = pose.neckZ;
-    // Shoulders ride up and in when she is braced, and out when she is open.
-    const lift = pose.shoulder * 0.012;
-    ud.armL.position.y = 0.20 + lift;
-    ud.armR.position.y = 0.20 + lift;
-    ud.armL.rotation.z += pose.shoulder * 0.18;
-    ud.armR.rotation.z -= pose.shoulder * 0.18;
 
     // The wings stay folded. They are vestigial: these flies cannot fly, and
     // all they get is a small idle flutter that picks up with excitement.
@@ -970,22 +1127,22 @@ async function command(action, payload = {}) { await fetch('/api/command', { met
 async function refresh() {
   try {
     const response = await fetch('/api/state', { cache: 'no-store' }); if (!response.ok) throw new Error('state unavailable'); state.data = await response.json(); state.selected = state.data.selected_fly || (state.data.agents[0] && state.data.agents[0].id);
-    $('connection').className = 'pill online'; $('connection').textContent = '● live'; $('status-text').textContent = state.data.running ? 'Runtime работает' : 'Runtime на паузе';
+    $('connection').className = 'pill online'; $('connection').textContent = 'РІвЂ”РЏ live'; $('status-text').textContent = state.data.running ? 'Runtime РЎР‚Р В°Р В±Р С•РЎвЂљР В°Р ВµРЎвЂљ' : 'Runtime Р Р…Р В° Р С—Р В°РЎС“Р В·Р Вµ';
     syncActStages();
     if (state.data.tick - state.lastUiTick >= 3 || state.lastUiTick < 0) { renderPanels(); state.lastUiTick = state.data.tick; }
-  } catch (error) { $('connection').className = 'pill offline'; $('connection').textContent = '● offline'; $('status-text').textContent = 'Runtime недоступен'; }
+  } catch (error) { $('connection').className = 'pill offline'; $('connection').textContent = 'РІвЂ”РЏ offline'; $('status-text').textContent = 'Runtime Р Р…Р ВµР Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р ВµР Р…'; }
 }
-const INTENT_LABELS = { explore: 'исследование', approach_odor: 'следовать за запахом', seek_light: 'поиск света', avoid_contact: 'избегание контакта', steer_toward_odor: 'поворот к запаху', break_contact: 'разрыв контакта', climb: 'набор высоты', maintain_course: 'удержание курса' };
+const INTENT_LABELS = { explore: 'Р С‘РЎРѓРЎРѓР В»Р ВµР Т‘Р С•Р Р†Р В°Р Р…Р С‘Р Вµ', approach_odor: 'РЎРѓР В»Р ВµР Т‘Р С•Р Р†Р В°РЎвЂљРЎРЉ Р В·Р В° Р В·Р В°Р С—Р В°РЎвЂ¦Р С•Р С', seek_light: 'Р С—Р С•Р С‘РЎРѓР С” РЎРѓР Р†Р ВµРЎвЂљР В°', avoid_contact: 'Р С‘Р В·Р В±Р ВµР С–Р В°Р Р…Р С‘Р Вµ Р С”Р С•Р Р…РЎвЂљР В°Р С”РЎвЂљР В°', steer_toward_odor: 'Р С—Р С•Р Р†Р С•РЎР‚Р С•РЎвЂљ Р С” Р В·Р В°Р С—Р В°РЎвЂ¦РЎС“', break_contact: 'РЎР‚Р В°Р В·РЎР‚РЎвЂ№Р Р† Р С”Р С•Р Р…РЎвЂљР В°Р С”РЎвЂљР В°', climb: 'Р Р…Р В°Р В±Р С•РЎР‚ Р Р†РЎвЂ№РЎРѓР С•РЎвЂљРЎвЂ№', maintain_course: 'РЎС“Р Т‘Р ВµРЎР‚Р В¶Р В°Р Р…Р С‘Р Вµ Р С”РЎС“РЎР‚РЎРѓР В°' };
 function intentLabel(value) { return INTENT_LABELS[value] || value; }
 function renderPanels() {
   const data = state.data; if (!data) return;
-  $('fps').textContent = `${Math.round(data.metrics.fps)} FPS`; $('tick').textContent = `tick ${data.tick}`; $('sim-time').textContent = `t = ${data.metrics.sim_time.toFixed(2)} s`; $('model-label').textContent = 'model: lightweight-policy'; $('pause').textContent = data.running ? 'Пауза' : 'Продолжить';
-  $('fly-list').innerHTML = data.agents.map((agent) => `<div class="fly-card ${agent.id === state.selected ? 'selected' : ''}" data-id="${agent.id}"><div class="fly-avatar">${agent.id}</div><div><strong>${escapeHtml(agent.name)}</strong><small>${agent.channel} · ${agent.neurotransmitter}</small></div><button class="remove" data-remove="${agent.id}" title="Удалить">×</button></div>`).join('');
+  $('fps').textContent = `${Math.round(data.metrics.fps)} FPS`; $('tick').textContent = `tick ${data.tick}`; $('sim-time').textContent = `t = ${data.metrics.sim_time.toFixed(2)} s`; $('model-label').textContent = 'model: lightweight-policy'; $('pause').textContent = data.running ? 'Р СџР В°РЎС“Р В·Р В°' : 'Р СџРЎР‚Р С•Р Т‘Р С•Р В»Р В¶Р С‘РЎвЂљРЎРЉ';
+  $('fly-list').innerHTML = data.agents.map((agent) => `<div class="fly-card ${agent.id === state.selected ? 'selected' : ''}" data-id="${agent.id}"><div class="fly-avatar">${agent.id}</div><div><strong>${escapeHtml(agent.name)}</strong><small>${agent.channel} Р’В· ${agent.neurotransmitter}</small></div><button class="remove" data-remove="${agent.id}" title="Р Р€Р Т‘Р В°Р В»Р С‘РЎвЂљРЎРЉ">Р“вЂ”</button></div>`).join('');
   document.querySelectorAll('.fly-card').forEach((card) => card.addEventListener('click', (event) => { if (event.target.dataset.remove) return; state.selected = Number(card.dataset.id); command('select', { id: state.selected }); }));
   document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); command('remove', { id: Number(button.dataset.remove) }); }));
   const agent = data.agents.find((item) => item.id === state.selected) || data.agents[0]; if (!agent) return;
-  $('selected-name').textContent = agent.name; $('selected-channel').textContent = agent.channel; $('input-value').textContent = agent.input_level.toFixed(2); $('reaction-value').textContent = agent.reaction_level.toFixed(2); $('nt-value').textContent = agent.neurotransmitter; $('energy-value').textContent = agent.energy.toFixed(2); $('input-meter').style.width = `${agent.input_level * 100}%`; $('reaction-meter').style.width = `${agent.reaction_level * 100}%`; $('hormone-meter').style.width = `${agent.hormone_level * 100}%`; $('energy-meter').style.width = `${agent.energy * 100}%`; $('speed').value = data.speed; $('speed-value').textContent = `${data.speed.toFixed(2)}×`; $('decay').value = data.decay; $('decay-value').textContent = data.decay.toFixed(2); $('hormone-toggle').textContent = agent.hormone_enabled ? 'ON' : 'OFF'; $('signal-bar').style.width = `${agent.input_level * 100}%`; $('reaction-bar').style.width = `${agent.reaction_level * 100}%`; $('hormone-bar').style.width = `${agent.hormone_level * 100}%`;
-  $('drive').textContent = `${intentLabel(agent.drive)} · ${agent.drive}`; $('decision').textContent = intentLabel(agent.decision); $('attention').textContent = agent.attention; $('confidence').textContent = `confidence ${Math.round(agent.confidence * 100)}%`;
+  $('selected-name').textContent = agent.name; $('selected-channel').textContent = agent.channel; $('input-value').textContent = agent.input_level.toFixed(2); $('reaction-value').textContent = agent.reaction_level.toFixed(2); $('nt-value').textContent = agent.neurotransmitter; $('energy-value').textContent = agent.energy.toFixed(2); $('input-meter').style.width = `${agent.input_level * 100}%`; $('reaction-meter').style.width = `${agent.reaction_level * 100}%`; $('hormone-meter').style.width = `${agent.hormone_level * 100}%`; $('energy-meter').style.width = `${agent.energy * 100}%`; $('speed').value = data.speed; $('speed-value').textContent = `${data.speed.toFixed(2)}Р“вЂ”`; $('decay').value = data.decay; $('decay-value').textContent = data.decay.toFixed(2); $('hormone-toggle').textContent = agent.hormone_enabled ? 'ON' : 'OFF'; $('signal-bar').style.width = `${agent.input_level * 100}%`; $('reaction-bar').style.width = `${agent.reaction_level * 100}%`; $('hormone-bar').style.width = `${agent.hormone_level * 100}%`;
+  $('drive').textContent = `${intentLabel(agent.drive)} Р’В· ${agent.drive}`; $('decision').textContent = intentLabel(agent.decision); $('attention').textContent = agent.attention; $('confidence').textContent = `confidence ${Math.round(agent.confidence * 100)}%`;
   $('adventure-name').textContent = data.adventure.name; $('adventure-objective').textContent = data.adventure.objective; $('adventure-score').textContent = `score ${data.adventure.score}`; $('adventure-progress').value = data.adventure.progress; $('adventure-select').value = data.adventure.id;
   $('strategy-value').textContent = agent.strategy; $('reward-value').textContent = `${Math.round(agent.reward * 100)}%`; $('novelty-value').textContent = `${Math.round(agent.novelty * 100)}%`; $('puff-value').textContent = `${agent.puff_count} (${data.metrics.total_puff_events})`; $('learning-value').textContent = String(data.metrics.learning_updates);
   renderActs(data);
@@ -1002,7 +1159,7 @@ function renderActs(data) {
     const style = `--act-color:${act.color}`;
     return `<button class="act-card ${active}" style="${style}" data-act="${escapeHtml(act.id)}" data-index="${index}" title="${escapeHtml(act.subtitle)}">
       <span class="act-num">${index + 1}</span>
-      <span><span class="act-name">${escapeHtml(act.name)}</span><span class="act-lesson">${escapeHtml(act.lesson)} · ${pct}%</span>
+      <span><span class="act-name">${escapeHtml(act.name)}</span><span class="act-lesson">${escapeHtml(act.lesson)} Р’В· ${pct}%</span>
       <span class="act-bar"><i style="width:${pct}%"></i></span></span>
     </button>`;
   }).join('');
@@ -1021,15 +1178,15 @@ function renderActs(data) {
 function renderBrain(data) {
   const brain = data.brain;
   const training = data.training || {};
-  $('training-toggle').textContent = training.enabled ? 'Авто: ВКЛ' : 'Авто: ВЫКЛ';
+  $('training-toggle').textContent = training.enabled ? 'Р С’Р Р†РЎвЂљР С•: Р вЂ™Р С™Р вЂє' : 'Р С’Р Р†РЎвЂљР С•: Р вЂ™Р В«Р С™Р вЂє';
   if ($('epsilon') !== document.activeElement) $('epsilon').value = String(training.epsilon ?? 0.25);
   if (!brain) {
-    $('brain-thought').textContent = 'муха не выбрана';
+    $('brain-thought').textContent = 'Р СРЎС“РЎвЂ¦Р В° Р Р…Р Вµ Р Р†РЎвЂ№Р В±РЎР‚Р В°Р Р…Р В°';
     return;
   }
   const pct = (v) => `${Math.round(Math.max(0, Math.min(1, v)) * 100)}%`;
   $('brain-thought').textContent = brain.thought;
-  $('brain-level').textContent = `ур. ${brain.level}`;
+  $('brain-level').textContent = `РЎС“РЎР‚. ${brain.level}`;
   $('brain-mastery').textContent = pct(brain.mastery);
   $('brain-mastery-meter').style.width = pct(brain.mastery);
   $('brain-weight').textContent = pct(brain.weight);
@@ -1067,9 +1224,12 @@ function renderBrain(data) {
  */
 function newPose() {
   return {
-    // Legs.
+    // Leg chains, indexed 0 = left, 1 = right.
+    legRoot: [0, 0], legKnee: [0, 0], legAnkle: [0, 0], legSplay: [0, 0],
+    // Arm chains, same order.
+    armRoot: [0, 0], armElbow: [0, 0], armWrist: [0, 0], armSplay: [0, 0],
+    // Old flat fields the posture and gesture layers still add to.
     legLx: 0, legRx: 0, legLz: 0, legRz: 0,
-    // Arms, as shoulder-pivot rotations.
     armLx: 0, armRx: 0, armLz: 0, armRz: 0,
     // Spine and torso.
     spineX: 0, spineY: 0, spineZ: 0,
@@ -1085,21 +1245,38 @@ function newPose() {
   };
 }
 
-function poseLegs(pose, swing) {
-  pose.legLx = swing;
-  pose.legRx = -swing;
-  // The knee only bends one way, so only the forward part of the cycle lifts
-  // the leg out to the side.
-  pose.legLz = Math.max(0, swing) * 0.25;
-  pose.legRz = Math.max(0, -swing) * 0.25;
-}
-
-function poseArms(pose, swing) {
-  // Arms counter-swing against the legs. At rest they hang, not stick out.
-  pose.armLx = -swing;
-  pose.armRx = swing;
-  pose.armLz = 0;
-  pose.armRz = 0;
+/*
+ * The model's joint trajectory, applied to all four chains.
+ *
+ * The knee and elbow are separate joints with separate angles, which is the
+ * whole point: a leg that only swings keeps the shin on the floor through the
+ * forward step and the character skates. A knee that folds on the swing phase
+ * lifts the foot clear, exactly as a real one does.
+ *
+ * This is the only layer that writes the hip and shoulder angles, because it is
+ * the only one the floor calculation knows about. Anything else added here
+ * would be a movement the ground could not follow.
+ */
+function poseLimbs(pose, limbs) {
+  if (!limbs) return;
+  const legs = [limbs.leg_l, limbs.leg_r];
+  const arms = [limbs.arm_l, limbs.arm_r];
+  for (let i = 0; i < 2; i++) {
+    const leg = legs[i];
+    if (leg) {
+      pose.legRoot[i] = leg.root;
+      pose.legKnee[i] = leg.middle;
+      pose.legAnkle[i] = leg.end;
+      pose.legSplay[i] = leg.spread;
+    }
+    const arm = arms[i];
+    if (arm) {
+      pose.armRoot[i] = arm.root;
+      pose.armElbow[i] = arm.middle;
+      pose.armWrist[i] = arm.end;
+      pose.armSplay[i] = arm.spread;
+    }
+  }
 }
 
 /*
@@ -1127,8 +1304,8 @@ function posePosture(pose, posture) {
 
 // Gesture ids, matching T_GES_* in TFLY.h.
 const GESTURE_IDS = {
-  'приветствие': 1, 'поклон': 2, 'хлопки': 3, 'указание': 4,
-  'утешение': 5, 'плечики': 6, 'прошу обнять': 7, 'покой': 0,
+  'Р С—РЎР‚Р С‘Р Р†Р ВµРЎвЂљРЎРѓРЎвЂљР Р†Р С‘Р Вµ': 1, 'Р С—Р С•Р С”Р В»Р С•Р Р…': 2, 'РЎвЂ¦Р В»Р С•Р С—Р С”Р С‘': 3, 'РЎС“Р С”Р В°Р В·Р В°Р Р…Р С‘Р Вµ': 4,
+  'РЎС“РЎвЂљР ВµРЎв‚¬Р ВµР Р…Р С‘Р Вµ': 5, 'Р С—Р В»Р ВµРЎвЂЎР С‘Р С”Р С‘': 6, 'Р С—РЎР‚Р С•РЎв‚¬РЎС“ Р С•Р В±Р Р…РЎРЏРЎвЂљРЎРЉ': 7, 'Р С—Р С•Р С”Р С•Р в„–': 0,
 };
 
 /*
@@ -1283,13 +1460,44 @@ function clampf(v, lo, hi) {
   return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/*
+ * How far below the hip the foot of one leg reaches, given the angles that are
+ * about to be applied.
+ *
+ * This is forward kinematics down the leg chain, and it mirrors TFootDrop in
+ * the core. Two implementations of one question is a risk, so the values are
+ * cross-checked against the model in the test suite rather than trusted.
+ *
+ * The sole hangs below the ankle, which is why a leg with a perfectly straight
+ * knee still reaches the floor at all.
+ */
+function footDrop(hipAngle, kneeAngle, ankleAngle) {
+  const knee = hipAngle + kneeAngle;
+  // The ankle angle is absolute, so it is used as given, exactly as the rig
+  // applies it. Anything that adds to it in one place and not the other puts
+  // the foot somewhere nobody asked for.
+  const theta = ankleAngle;
+  // The sole is a long ellipsoid, and its true vertical reach is the support
+  // distance of that shape, not the length of a single radius. Treating it as a
+  // point overestimates the foot's height by most of a foot once the ankle
+  // tilts, and the character visibly hovers with a bent knee.
+  const vertical = RIG.leg.soleA * Math.cos(theta);
+  const along = RIG.leg.soleB * Math.sin(theta);
+  return -(
+    RIG.leg.thigh * Math.cos(hipAngle) +
+    RIG.leg.shin * Math.cos(knee) +
+    (RIG.leg.soleC * Math.cos(theta) + RIG.leg.soleF * Math.sin(theta)) +
+    Math.hypot(vertical, along)
+  );
+}
+
 // ---- gait and affect -------------------------------------------------
 function renderGaitAndAffect(agent) {
   const gait = agent.gait || {};
   const pct = (v) => `${Math.round(Math.max(0, Math.min(1, v || 0)) * 100)}%`;
-  $('gait-preset').textContent = gait.preset || '—';
-  $('gait-steps').textContent = `${gait.steps || 0} шагов`;
-  $('gait-balance').textContent = `устойчивость ${pct(gait.balance)}`;
+  $('gait-preset').textContent = gait.preset || 'РІР‚вЂќ';
+  $('gait-steps').textContent = `${gait.steps || 0} РЎв‚¬Р В°Р С–Р С•Р Р†`;
+  $('gait-balance').textContent = `РЎС“РЎРѓРЎвЂљР С•Р в„–РЎвЂЎР С‘Р Р†Р С•РЎРѓРЎвЂљРЎРЉ ${pct(gait.balance)}`;
   $('gait-stride').style.width = pct(gait.stride);
   $('gait-cadence').style.width = pct(gait.cadence);
   $('gait-sway').style.width = pct(gait.sway);
@@ -1303,7 +1511,7 @@ function renderGaitAndAffect(agent) {
 
   // Every emotion, not just the strongest, so a character reads as a mix.
   const affect = agent.affect || [];
-  $('affect-count').textContent = `${affect.filter((e) => e.value > 0.01).length} активных`;
+  $('affect-count').textContent = `${affect.filter((e) => e.value > 0.01).length} Р В°Р С”РЎвЂљР С‘Р Р†Р Р…РЎвЂ№РЎвЂ¦`;
   $('affect-list').innerHTML = affect.map((e) =>
     `<span class="affect-row">${escapeHtml(e.name)}<i style="width:${pct(e.value)}"></i><b>${Math.round(e.value * 100)}</b></span>`
   ).join('');
@@ -1311,7 +1519,7 @@ function renderGaitAndAffect(agent) {
   // Face gauges, straight from the model.
   const face = agent.face || {};
   const blinkValue = face.blink ?? 0;
-  $('face-blink').textContent = blinkValue > 0.7 ? 'глаза закрыты' : (blinkValue > 0.2 ? 'моргает' : 'глаза открыты');
+  $('face-blink').textContent = blinkValue > 0.7 ? 'Р С–Р В»Р В°Р В·Р В° Р В·Р В°Р С”РЎР‚РЎвЂ№РЎвЂљРЎвЂ№' : (blinkValue > 0.2 ? 'Р СР С•РЎР‚Р С–Р В°Р ВµРЎвЂљ' : 'Р С–Р В»Р В°Р В·Р В° Р С•РЎвЂљР С”РЎР‚РЎвЂ№РЎвЂљРЎвЂ№');
   $('face-blink-meter').style.width = pct(blinkValue);
   $('face-pupil-meter').style.width = pct(((face.pupil ?? 1) - 0.5) / 1.1);
   // Brow and mouth run -1..1, so shift them into a 0..1 bar.
@@ -1322,10 +1530,10 @@ function renderGaitAndAffect(agent) {
 
   // Social.
   const social = agent.social || {};
-  $('social-gesture').textContent = social.gesture || 'покой';
-  $('social-partner').textContent = social.partner ? `с #${social.partner}` : 'одинока';
+  $('social-gesture').textContent = social.gesture || 'Р С—Р С•Р С”Р С•Р в„–';
+  $('social-partner').textContent = social.partner ? `РЎРѓ #${social.partner}` : 'Р С•Р Т‘Р С‘Р Р…Р С•Р С”Р В°';
   $('social-bond-meter').style.width = pct(social.bond);
-  $('social-last').textContent = social.last_encounter || '—';
+  $('social-last').textContent = social.last_encounter || 'РІР‚вЂќ';
 
   // Posture. The spine and the lean are signed, so their meters grow out from
   // the centre; a plain left-anchored bar would read "curled in" and
@@ -1340,11 +1548,11 @@ function renderGaitAndAffect(agent) {
   const eyeOpen = clampf(face.eye_open ?? 1, 0, 1);
   const woke = face.wake_timer ?? 99;
   $('face-eyes-state').textContent =
-    eyeOpen < 0.2 ? 'спит'
-      : woke < 1.4 ? `просыпается ${(1.4 - woke).toFixed(1)}с`
-        : (face.blink ?? 0) > 0.7 ? 'моргает'
-          : eyeOpen < 0.98 ? 'прищурена' : 'открыты';
-  $('sleep-toggle').textContent = eyeOpen < 0.2 ? 'Разбудить' : 'Усыпить';
+    eyeOpen < 0.2 ? 'РЎРѓР С—Р С‘РЎвЂљ'
+      : woke < 1.4 ? `Р С—РЎР‚Р С•РЎРѓРЎвЂ№Р С—Р В°Р ВµРЎвЂљРЎРѓРЎРЏ ${(1.4 - woke).toFixed(1)}РЎРѓ`
+        : (face.blink ?? 0) > 0.7 ? 'Р СР С•РЎР‚Р С–Р В°Р ВµРЎвЂљ'
+          : eyeOpen < 0.98 ? 'Р С—РЎР‚Р С‘РЎвЂ°РЎС“РЎР‚Р ВµР Р…Р В°' : 'Р С•РЎвЂљР С”РЎР‚РЎвЂ№РЎвЂљРЎвЂ№';
+  $('sleep-toggle').textContent = eyeOpen < 0.2 ? 'Р В Р В°Р В·Р В±РЎС“Р Т‘Р С‘РЎвЂљРЎРЉ' : 'Р Р€РЎРѓРЎвЂ№Р С—Р С‘РЎвЂљРЎРЉ';
   const gazeLock = (agent.social || {}).drive ?? 0;
   $('face-gaze-meter').style.width = pct(Math.abs(face.gaze_x ?? 0) * (0.3 + 0.7 * gazeLock));
 }
@@ -1371,7 +1579,7 @@ function drawCurve(points) {
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   ctx.clearRect(0, 0, w, h);
 
-  $('curve-label').textContent = points.length ? `${points.length} проб` : 'нет данных';
+  $('curve-label').textContent = points.length ? `${points.length} Р С—РЎР‚Р С•Р В±` : 'Р Р…Р ВµРЎвЂљ Р Т‘Р В°Р Р…Р Р…РЎвЂ№РЎвЂ¦';
   if (points.length < 2) return;
 
   const pad = 3 * dpr;
@@ -1410,7 +1618,7 @@ function drawCurve(points) {
 
 // ---- event log --------------------------------------------------------
 function renderLog(entries, path) {
-  $('log-path').textContent = path ? 'jsonl' : 'память';
+  $('log-path').textContent = path ? 'jsonl' : 'Р С—Р В°Р СРЎРЏРЎвЂљРЎРЉ';
   const list = $('log-list');
   const html = entries.slice().reverse().slice(0, 40).map((e) => {
     const stamp = `${Math.floor(e.t / 60)}:${String(Math.floor(e.t % 60)).padStart(2, '0')}`;
@@ -1438,7 +1646,7 @@ function render3D() {
   renderer.render(scene, camera);
   requestAnimationFrame(render3D);
 }
-$('pause').addEventListener('click', () => command(state.data && state.data.running ? 'pause' : 'resume')); $('reset').addEventListener('click', () => command('reset')); $('add-fly').addEventListener('click', () => command('add')); $('speed').addEventListener('input', (event) => command('speed', { value: Number(event.target.value) })); $('decay').addEventListener('input', (event) => command('decay', { value: Number(event.target.value) })); $('hormone-toggle').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('hormone', { id: agent.id, enabled: !agent.hormone_enabled }); }); $('open-bridge').addEventListener('click', () => window.alert('Для полной 3D-сцены запусти: scripts/run_demo.ps1 -WithBlender'));
+$('pause').addEventListener('click', () => command(state.data && state.data.running ? 'pause' : 'resume')); $('reset').addEventListener('click', () => command('reset')); $('add-fly').addEventListener('click', () => command('add')); $('speed').addEventListener('input', (event) => command('speed', { value: Number(event.target.value) })); $('decay').addEventListener('input', (event) => command('decay', { value: Number(event.target.value) })); $('hormone-toggle').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('hormone', { id: agent.id, enabled: !agent.hormone_enabled }); }); $('open-bridge').addEventListener('click', () => window.alert('Р вЂќР В»РЎРЏ Р С—Р С•Р В»Р Р…Р С•Р в„– 3D-РЎРѓРЎвЂ Р ВµР Р…РЎвЂ№ Р В·Р В°Р С—РЎС“РЎРѓРЎвЂљР С‘: scripts/run_demo.ps1 -WithBlender'));
 $('adventure-select').addEventListener('change', (event) => command('adventure', { name: event.target.value }));
 
 // Training controls operate on the selected fly.
@@ -1453,7 +1661,7 @@ $('walk-burst').addEventListener('click', () => command('walk', { value: 200 }))
 // nearest other fly.
 $('gesture-cycle').addEventListener('click', () => {
   if (state.selected == null) return;
-  const order = ['покой', 'приветствие', 'поклон', 'хлопки', 'указание', 'утешение', 'плечики', 'прошу обнять'];
+  const order = ['Р С—Р С•Р С”Р С•Р в„–', 'Р С—РЎР‚Р С‘Р Р†Р ВµРЎвЂљРЎРѓРЎвЂљР Р†Р С‘Р Вµ', 'Р С—Р С•Р С”Р В»Р С•Р Р…', 'РЎвЂ¦Р В»Р С•Р С—Р С”Р С‘', 'РЎС“Р С”Р В°Р В·Р В°Р Р…Р С‘Р Вµ', 'РЎС“РЎвЂљР ВµРЎв‚¬Р ВµР Р…Р С‘Р Вµ', 'Р С—Р В»Р ВµРЎвЂЎР С‘Р С”Р С‘', 'Р С—РЎР‚Р С•РЎв‚¬РЎС“ Р С•Р В±Р Р…РЎРЏРЎвЂљРЎРЉ'];
   const agent = state.data && state.data.agents.find((item) => item.id === state.selected);
   const current = agent && agent.social ? order.indexOf(agent.social.gesture) : -1;
   command('gesture', { id: state.selected, value: ((current < 0 ? 0 : current) + 1) % 8 });

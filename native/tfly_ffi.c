@@ -175,6 +175,50 @@ float tfly_look_x(TFlyHandle *h) { return h->look_x; }
 float tfly_look_y(TFlyHandle *h) { return h->look_y; }
 float tfly_look_lock(TFlyHandle *h) { return h->look_lock; }
 
+/* ---- limbs ----
+ * The four joints of one limb, in T_LIMB_* order. Copied out in one call
+ * because a rig reads all sixteen numbers every frame and four calls per limb
+ * would be sixty-four crossings a frame for no reason. */
+void tfly_limbs(TFlyHandle *h, float *out) {
+    TFLYLimb limbs[TFLY_N_LIMB];
+    TGaitLimbs(h, limbs);
+    for (int i = 0; i < TFLY_N_LIMB; i++) {
+        out[i * 4 + 0] = limbs[i].root;
+        out[i * 4 + 1] = limbs[i].middle;
+        out[i * 4 + 2] = limbs[i].end;
+        out[i * 4 + 3] = limbs[i].spread;
+    }
+}
+
+/* How far below the hip the lower foot reaches, so the rig can stand on the
+ * floor instead of sinking into it.
+ *
+ * The segment lengths are passed in rather than baked in, because they are the
+ * renderer's proportions and not the model's. The model knows the angles; only
+ * the rig knows how long its bones are. */
+float tfly_foot_drop(TFlyHandle *h, float thigh, float shin, float sole_c, float sole_a,
+                     float sole_b, float sole_f) {
+    TFLYLimb limbs[TFLY_N_LIMB];
+    TGaitLimbs(h, limbs);
+    float a = TFootDrop(&limbs[T_LIMB_LEG_L], thigh, shin, sole_c, sole_a, sole_b, sole_f);
+    float b = TFootDrop(&limbs[T_LIMB_LEG_R], thigh, shin, sole_c, sole_a, sole_b, sole_f);
+    /* The lower of the two is the one that has to reach the ground. */
+    return a < b ? a : b;
+}
+
+/* The same question asked about one specific leg pose, so a caller holding its
+ * own angles can check them against the model's answer for the current phase. */
+float tfly_foot_drop_pose(const float *root, const float *middle, const float *end, float thigh,
+                          float shin, float sole_c, float sole_a, float sole_b, float sole_f) {
+    TFLYLimb leg;
+    leg.root = *root;
+    leg.middle = *middle;
+    leg.end = *end;
+    leg.spread = 0.0f;
+    return TFootDrop(&leg, thigh, shin, sole_c, sole_a, sole_b, sole_f);
+}
+void tfly_set_phase(TFlyHandle *h, float phase) { h->gait_phase = phase; }
+
 /* ---- posture ---- */
 float tfly_spine(TFlyHandle *h) { return h->spine; }
 float tfly_shoulder(TFlyHandle *h) { return h->shoulder; }

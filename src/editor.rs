@@ -101,6 +101,31 @@ pub struct PostureSnapshot {
     pub lean: f32,
 }
 
+/// The four joints of one limb, in radians.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct JointsSnapshot {
+    /// Hip or shoulder swing.
+    pub root: f32,
+    /// Knee or elbow bend.
+    pub middle: f32,
+    /// Ankle or wrist.
+    pub end: f32,
+    /// Sideways splay.
+    pub spread: f32,
+}
+
+/// Every joint of every limb, so the rig can pose four chains independently.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct LimbSnapshot {
+    pub leg_l: JointsSnapshot,
+    pub leg_r: JointsSnapshot,
+    pub arm_l: JointsSnapshot,
+    pub arm_r: JointsSnapshot,
+    /// How far below the hip the lower foot reaches, given the rig's segment
+    /// lengths. The rig subtracts this from the root to stand on the floor.
+    pub foot_drop: f32,
+}
+
 /// What a character is doing with her body, and who she is doing it to.
 #[derive(Debug, Clone, Serialize)]
 pub struct SocialSnapshot {
@@ -149,8 +174,6 @@ pub struct AgentSnapshot {
     pub hormone_enabled: bool,
     pub channel: String,
     pub selected: bool,
-    /// Body height above the floor, plus the walk cycle.
-    pub height: f32,
     pub gait: GaitSnapshot,
     /// Every emotion, not just the dominant one, for the affect display.
     ///
@@ -163,6 +186,8 @@ pub struct AgentSnapshot {
     pub face: FaceSnapshot,
     /// How she carries her body.
     pub posture: PostureSnapshot,
+    /// Every joint of every limb.
+    pub limbs: LimbSnapshot,
     /// Gesture and relationship state.
     pub social: SocialSnapshot,
 }
@@ -222,6 +247,22 @@ const LEVEL_LOG_INTERVAL: f32 = 3.0;
 /// Half the distance two comfortable characters will tolerate between them.
 /// Shyness and fear widen it, a bond narrows it.
 const PERSONAL_SPACE: f32 = 0.55;
+
+/// The rig's leg dimensions. They belong to the renderer, but the model needs
+/// them to place the body on the floor: it owns the joint angles, and only the
+/// renderer knows how long the bones are.
+///
+/// The sole is an ellipsoid, not a point. A point below the ankle overestimates
+/// the foot's height by most of a foot as the ankle tilts, which leaves the
+/// character hovering whenever the knee folds.
+pub const RIG_LEG: tfly::Sole = tfly::Sole {
+    thigh: 0.10,
+    shin: 0.10,
+    sole_c: 0.017,
+    sole_a: 0.032 * 0.6,
+    sole_b: 0.032 * 1.35,
+    sole_f: 0.020,
+};
 #[derive(Debug, Clone, Serialize)]
 pub struct BrainSnapshot {
     pub act: String,
@@ -566,10 +607,22 @@ impl Agent {
 
 fn adventure_spec(id: &str) -> (&'static str, &'static str) {
     match id {
-        "odor_trail" => ("odor_trail", "Следуй за подвижным запахом"),
-        "ring_circuit" => ("ring_circuit", "Пролети кольцо арены три раза"),
-        "hormone_calibration" => ("hormone_calibration", "Собери сигнал и выпусти гормон"),
-        _ => ("free_flight", "Свободный полёт и исследование"),
+        "odor_trail" => (
+            "odor_trail",
+            "Р В Р Р‹Р В Р’В»Р В Р’ВµР В РўвЂР РЋРЎвЂњР В РІвЂћвЂ“ Р В Р’В·Р В Р’В° Р В РЎвЂ”Р В РЎвЂўР В РўвЂР В Р вЂ Р В РЎвЂР В Р’В¶Р В Р вЂ¦Р РЋРІР‚в„–Р В РЎВ Р В Р’В·Р В Р’В°Р В РЎвЂ”Р В Р’В°Р РЋРІР‚В¦Р В РЎвЂўР В РЎВ",
+        ),
+        "ring_circuit" => (
+            "ring_circuit",
+            "Р В РЎСџР РЋР вЂљР В РЎвЂўР В Р’В»Р В Р’ВµР РЋРІР‚С™Р В РЎвЂ Р В РЎвЂќР В РЎвЂўР В Р’В»Р РЋР Р‰Р РЋРІР‚В Р В РЎвЂў Р В Р’В°Р РЋР вЂљР В Р’ВµР В Р вЂ¦Р РЋРІР‚в„– Р РЋРІР‚С™Р РЋР вЂљР В РЎвЂ Р РЋР вЂљР В Р’В°Р В Р’В·Р В Р’В°",
+        ),
+        "hormone_calibration" => (
+            "hormone_calibration",
+            "Р В Р Р‹Р В РЎвЂўР В Р’В±Р В Р’ВµР РЋР вЂљР В РЎвЂ Р РЋР С“Р В РЎвЂР В РЎвЂ“Р В Р вЂ¦Р В Р’В°Р В Р’В» Р В РЎвЂ Р В Р вЂ Р РЋРІР‚в„–Р В РЎвЂ”Р РЋРЎвЂњР РЋР С“Р РЋРІР‚С™Р В РЎвЂ Р В РЎвЂ“Р В РЎвЂўР РЋР вЂљР В РЎВР В РЎвЂўР В Р вЂ¦",
+        ),
+        _ => (
+            "free_flight",
+            "Р В Р Р‹Р В Р вЂ Р В РЎвЂўР В Р’В±Р В РЎвЂўР В РўвЂР В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р РЋРІР‚ВР РЋРІР‚С™ Р В РЎвЂ Р В РЎвЂР РЋР С“Р РЋР С“Р В Р’В»Р В Р’ВµР В РўвЂР В РЎвЂўР В Р вЂ Р В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ",
+        ),
     }
 }
 
@@ -612,7 +665,12 @@ pub const CANDIDATES: [i32; 6] = [
 ];
 
 /// The four gaits a character can learn to walk with, in C-core order.
-pub const GAIT_NAMES: [&str; 4] = ["торопливый", "ровный", "длинный", "петляющий"];
+pub const GAIT_NAMES: [&str; 4] = [
+    "Р РЋРІР‚С™Р В РЎвЂўР РЋР вЂљР В РЎвЂўР В РЎвЂ”Р В Р’В»Р В РЎвЂР В Р вЂ Р РЋРІР‚в„–Р В РІвЂћвЂ“",
+    "Р РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“",
+    "Р В РўвЂР В Р’В»Р В РЎвЂР В Р вЂ¦Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“",
+    "Р В РЎвЂ”Р В Р’ВµР РЋРІР‚С™Р В Р’В»Р РЋР РЏР РЋР вЂ№Р РЋРІР‚В°Р В РЎвЂР В РІвЂћвЂ“",
+];
 
 /// Russian label for every emotion, matching `T_EMO_*` order.
 /// Stable ASCII keys, index-for-index with `EMOTION_NAMES` and the `T_EMO_*`
@@ -655,40 +713,40 @@ pub const EMOTION_KEYS: [&str; 26] = [
 ];
 
 pub const EMOTION_NAMES: [&str; 26] = [
-    "боль",
-    "страх",
-    "радость",
-    "грусть",
-    "злость",
-    "отвращение",
-    "удивление",
-    "любопытство",
-    "влечение",
-    "жажда цели",
-    "довольство",
-    "тревога",
-    "растерянность",
-    "гордость",
-    "благодарность",
-    "облегчение",
-    "разочарование",
-    "надежда",
-    "ревность",
-    "застенчивость",
-    "привязанность",
-    "скука",
-    "восторг",
-    "сочувствие",
-    "доверие",
-    "тоска",
+    "Р В Р’В±Р В РЎвЂўР В Р’В»Р РЋР Р‰",
+    "Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р РЋРІР‚В¦",
+    "Р РЋР вЂљР В Р’В°Р В РўвЂР В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р В РЎвЂ“Р РЋР вЂљР РЋРЎвЂњР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р В Р’В·Р В Р’В»Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р В РЎвЂўР РЋРІР‚С™Р В Р вЂ Р РЋР вЂљР В Р’В°Р РЋРІР‚В°Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ",
+    "Р РЋРЎвЂњР В РўвЂР В РЎвЂР В Р вЂ Р В Р’В»Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ",
+    "Р В Р’В»Р РЋР вЂ№Р В Р’В±Р В РЎвЂўР В РЎвЂ”Р РЋРІР‚в„–Р РЋРІР‚С™Р РЋР С“Р РЋРІР‚С™Р В Р вЂ Р В РЎвЂў",
+    "Р В Р вЂ Р В Р’В»Р В Р’ВµР РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ",
+    "Р В Р’В¶Р В Р’В°Р В Р’В¶Р В РўвЂР В Р’В° Р РЋРІР‚В Р В Р’ВµР В Р’В»Р В РЎвЂ",
+    "Р В РўвЂР В РЎвЂўР В Р вЂ Р В РЎвЂўР В Р’В»Р РЋР Р‰Р РЋР С“Р РЋРІР‚С™Р В Р вЂ Р В РЎвЂў",
+    "Р РЋРІР‚С™Р РЋР вЂљР В Р’ВµР В Р вЂ Р В РЎвЂўР В РЎвЂ“Р В Р’В°",
+    "Р РЋР вЂљР В Р’В°Р РЋР С“Р РЋРІР‚С™Р В Р’ВµР РЋР вЂљР РЋР РЏР В Р вЂ¦Р В Р вЂ¦Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р В РЎвЂ“Р В РЎвЂўР РЋР вЂљР В РўвЂР В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р В Р’В±Р В Р’В»Р В Р’В°Р В РЎвЂ“Р В РЎвЂўР В РўвЂР В Р’В°Р РЋР вЂљР В Р вЂ¦Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р В РЎвЂўР В Р’В±Р В Р’В»Р В Р’ВµР В РЎвЂ“Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ",
+    "Р РЋР вЂљР В Р’В°Р В Р’В·Р В РЎвЂўР РЋРІР‚РЋР В Р’В°Р РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ",
+    "Р В Р вЂ¦Р В Р’В°Р В РўвЂР В Р’ВµР В Р’В¶Р В РўвЂР В Р’В°",
+    "Р РЋР вЂљР В Р’ВµР В Р вЂ Р В Р вЂ¦Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р В Р’В·Р В Р’В°Р РЋР С“Р РЋРІР‚С™Р В Р’ВµР В Р вЂ¦Р РЋРІР‚РЋР В РЎвЂР В Р вЂ Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р В РЎвЂ”Р РЋР вЂљР В РЎвЂР В Р вЂ Р РЋР РЏР В Р’В·Р В Р’В°Р В Р вЂ¦Р В Р вЂ¦Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+    "Р РЋР С“Р В РЎвЂќР РЋРЎвЂњР В РЎвЂќР В Р’В°",
+    "Р В Р вЂ Р В РЎвЂўР РЋР С“Р РЋРІР‚С™Р В РЎвЂўР РЋР вЂљР В РЎвЂ“",
+    "Р РЋР С“Р В РЎвЂўР РЋРІР‚РЋР РЋРЎвЂњР В Р вЂ Р РЋР С“Р РЋРІР‚С™Р В Р вЂ Р В РЎвЂР В Р’Вµ",
+    "Р В РўвЂР В РЎвЂўР В Р вЂ Р В Р’ВµР РЋР вЂљР В РЎвЂР В Р’Вµ",
+    "Р РЋРІР‚С™Р В РЎвЂўР РЋР С“Р В РЎвЂќР В Р’В°",
 ];
 
 pub const ACTS: [Act; 5] = [
     Act {
         id: "main_stage",
-        name: "Главная арена",
-        subtitle: "Прожекторы, аплодисменты, купол",
-        lesson: "Яркий свет вызывает танец",
+        name: "Р В РІР‚СљР В Р’В»Р В Р’В°Р В Р вЂ Р В Р вЂ¦Р В Р’В°Р РЋР РЏ Р В Р’В°Р РЋР вЂљР В Р’ВµР В Р вЂ¦Р В Р’В°",
+        subtitle: "Р В РЎСџР РЋР вЂљР В РЎвЂўР В Р’В¶Р В Р’ВµР В РЎвЂќР РЋРІР‚С™Р В РЎвЂўР РЋР вЂљР РЋРІР‚в„–, Р В Р’В°Р В РЎвЂ”Р В Р’В»Р В РЎвЂўР В РўвЂР В РЎвЂР РЋР С“Р В РЎВР В Р’ВµР В Р вЂ¦Р РЋРІР‚С™Р РЋРІР‚в„–, Р В РЎвЂќР РЋРЎвЂњР В РЎвЂ”Р В РЎвЂўР В Р’В»",
+        lesson: "Р В Р вЂЎР РЋР вЂљР В РЎвЂќР В РЎвЂР В РІвЂћвЂ“ Р РЋР С“Р В Р вЂ Р В Р’ВµР РЋРІР‚С™ Р В Р вЂ Р РЋРІР‚в„–Р В Р’В·Р РЋРІР‚в„–Р В Р вЂ Р В Р’В°Р В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р В Р’В°Р В Р вЂ¦Р В Р’ВµР РЋРІР‚В ",
         origin: [0.0, 0.0],
         color: "#ff5c7a",
         cue: cue::LIGHT,
@@ -698,9 +756,9 @@ pub const ACTS: [Act; 5] = [
     },
     Act {
         id: "labyrinth",
-        name: "Лабиринт",
-        subtitle: "Стены, повороты, ориентиры",
-        lesson: "Вибрация пола ведёт к цели",
+        name: "Р В РІР‚С”Р В Р’В°Р В Р’В±Р В РЎвЂР РЋР вЂљР В РЎвЂР В Р вЂ¦Р РЋРІР‚С™",
+        subtitle: "Р В Р Р‹Р РЋРІР‚С™Р В Р’ВµР В Р вЂ¦Р РЋРІР‚в„–, Р В РЎвЂ”Р В РЎвЂўР В Р вЂ Р В РЎвЂўР РЋР вЂљР В РЎвЂўР РЋРІР‚С™Р РЋРІР‚в„–, Р В РЎвЂўР РЋР вЂљР В РЎвЂР В Р’ВµР В Р вЂ¦Р РЋРІР‚С™Р В РЎвЂР РЋР вЂљР РЋРІР‚в„–",
+        lesson: "Р В РІР‚в„ўР В РЎвЂР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР РЋР РЏ Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р’В° Р В Р вЂ Р В Р’ВµР В РўвЂР РЋРІР‚ВР РЋРІР‚С™ Р В РЎвЂќ Р РЋРІР‚В Р В Р’ВµР В Р’В»Р В РЎвЂ",
         origin: [6.4, 0.0],
         color: "#54d7e8",
         cue: cue::VIBRATION,
@@ -710,9 +768,9 @@ pub const ACTS: [Act; 5] = [
     },
     Act {
         id: "garden",
-        name: "Чародейный сад",
-        subtitle: "Цветы, фруктовый аромат, тепло",
-        lesson: "Запах фрукта ведёт к еде",
+        name: "Р В Р’В§Р В Р’В°Р РЋР вЂљР В РЎвЂўР В РўвЂР В Р’ВµР В РІвЂћвЂ“Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р РЋР С“Р В Р’В°Р В РўвЂ",
+        subtitle: "Р В Р’В¦Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р РЋРІР‚в„–, Р РЋРІР‚С›Р РЋР вЂљР РЋРЎвЂњР В РЎвЂќР РЋРІР‚С™Р В РЎвЂўР В Р вЂ Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В Р’В°Р РЋР вЂљР В РЎвЂўР В РЎВР В Р’В°Р РЋРІР‚С™, Р РЋРІР‚С™Р В Р’ВµР В РЎвЂ”Р В Р’В»Р В РЎвЂў",
+        lesson: "Р В РІР‚вЂќР В Р’В°Р В РЎвЂ”Р В Р’В°Р РЋРІР‚В¦ Р РЋРІР‚С›Р РЋР вЂљР РЋРЎвЂњР В РЎвЂќР РЋРІР‚С™Р В Р’В° Р В Р вЂ Р В Р’ВµР В РўвЂР РЋРІР‚ВР РЋРІР‚С™ Р В РЎвЂќ Р В Р’ВµР В РўвЂР В Р’Вµ",
         origin: [0.0, 6.0],
         color: "#8ce06a",
         cue: cue::ODOR_FRUIT,
@@ -722,9 +780,9 @@ pub const ACTS: [Act; 5] = [
     },
     Act {
         id: "factory",
-        name: "Фабрика чудес",
-        subtitle: "Шестерни, металл, громкий стук",
-        lesson: "Стук требует точного движения",
+        name: "Р В Р’В¤Р В Р’В°Р В Р’В±Р РЋР вЂљР В РЎвЂР В РЎвЂќР В Р’В° Р РЋРІР‚РЋР РЋРЎвЂњР В РўвЂР В Р’ВµР РЋР С“",
+        subtitle: "Р В Р РѓР В Р’ВµР РЋР С“Р РЋРІР‚С™Р В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂ, Р В РЎВР В Р’ВµР РЋРІР‚С™Р В Р’В°Р В Р’В»Р В Р’В», Р В РЎвЂ“Р РЋР вЂљР В РЎвЂўР В РЎВР В РЎвЂќР В РЎвЂР В РІвЂћвЂ“ Р РЋР С“Р РЋРІР‚С™Р РЋРЎвЂњР В РЎвЂќ",
+        lesson: "Р В Р Р‹Р РЋРІР‚С™Р РЋРЎвЂњР В РЎвЂќ Р РЋРІР‚С™Р РЋР вЂљР В Р’ВµР В Р’В±Р РЋРЎвЂњР В Р’ВµР РЋРІР‚С™ Р РЋРІР‚С™Р В РЎвЂўР РЋРІР‚РЋР В Р вЂ¦Р В РЎвЂўР В РЎвЂ“Р В РЎвЂў Р В РўвЂР В Р вЂ Р В РЎвЂР В Р’В¶Р В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР РЏ",
         origin: [-6.4, 0.0],
         color: "#ffb86b",
         cue: cue::SOUND,
@@ -734,9 +792,9 @@ pub const ACTS: [Act; 5] = [
     },
     Act {
         id: "void",
-        name: "Пустота",
-        subtitle: "Ни света, ни звука, ни края",
-        lesson: "В темноте нужно замереть",
+        name: "Р В РЎСџР РЋРЎвЂњР РЋР С“Р РЋРІР‚С™Р В РЎвЂўР РЋРІР‚С™Р В Р’В°",
+        subtitle: "Р В РЎСљР В РЎвЂ Р РЋР С“Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В Р’В°, Р В Р вЂ¦Р В РЎвЂ Р В Р’В·Р В Р вЂ Р РЋРЎвЂњР В РЎвЂќР В Р’В°, Р В Р вЂ¦Р В РЎвЂ Р В РЎвЂќР РЋР вЂљР В Р’В°Р РЋР РЏ",
+        lesson: "Р В РІР‚в„ў Р РЋРІР‚С™Р В Р’ВµР В РЎВР В Р вЂ¦Р В РЎвЂўР РЋРІР‚С™Р В Р’Вµ Р В Р вЂ¦Р РЋРЎвЂњР В Р’В¶Р В Р вЂ¦Р В РЎвЂў Р В Р’В·Р В Р’В°Р В РЎВР В Р’ВµР РЋР вЂљР В Р’ВµР РЋРІР‚С™Р РЋР Р‰",
         origin: [0.0, -6.0],
         color: "#a98bff",
         cue: cue::DARK,
@@ -753,35 +811,73 @@ fn act_by_id(id: &str) -> Option<&'static Act> {
 /// Russian label for a conditioned stimulus.
 fn cue_name(cue_id: i32) -> &'static str {
     match cue_id {
-        cue::LIGHT => "яркий свет",
-        cue::DARK => "темнота",
-        cue::VIBRATION => "вибрация пола",
-        cue::SOUND => "стук",
-        cue::ODOR_FRUIT => "запах фрукта",
-        cue::ODOR_FLOWER => "запах цветка",
-        cue::ODOR_FEMALE => "запах самки",
-        cue::TOUCH => "прикосновение",
-        cue::TEMPERATURE => "температура",
-        cue::VISUAL => "зрительный образ",
-        cue::GRAVITY => "гравитация",
-        _ => "запах самца",
+        cue::LIGHT => {
+            "Р РЋР РЏР РЋР вЂљР В РЎвЂќР В РЎвЂР В РІвЂћвЂ“ Р РЋР С“Р В Р вЂ Р В Р’ВµР РЋРІР‚С™"
+        }
+        cue::DARK => "Р РЋРІР‚С™Р В Р’ВµР В РЎВР В Р вЂ¦Р В РЎвЂўР РЋРІР‚С™Р В Р’В°",
+        cue::VIBRATION => {
+            "Р В Р вЂ Р В РЎвЂР В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚В Р В РЎвЂР РЋР РЏ Р В РЎвЂ”Р В РЎвЂўР В Р’В»Р В Р’В°"
+        }
+        cue::SOUND => "Р РЋР С“Р РЋРІР‚С™Р РЋРЎвЂњР В РЎвЂќ",
+        cue::ODOR_FRUIT => {
+            "Р В Р’В·Р В Р’В°Р В РЎвЂ”Р В Р’В°Р РЋРІР‚В¦ Р РЋРІР‚С›Р РЋР вЂљР РЋРЎвЂњР В РЎвЂќР РЋРІР‚С™Р В Р’В°"
+        }
+        cue::ODOR_FLOWER => {
+            "Р В Р’В·Р В Р’В°Р В РЎвЂ”Р В Р’В°Р РЋРІР‚В¦ Р РЋРІР‚В Р В Р вЂ Р В Р’ВµР РЋРІР‚С™Р В РЎвЂќР В Р’В°"
+        }
+        cue::ODOR_FEMALE => {
+            "Р В Р’В·Р В Р’В°Р В РЎвЂ”Р В Р’В°Р РЋРІР‚В¦ Р РЋР С“Р В Р’В°Р В РЎВР В РЎвЂќР В РЎвЂ"
+        }
+        cue::TOUCH => {
+            "Р В РЎвЂ”Р РЋР вЂљР В РЎвЂР В РЎвЂќР В РЎвЂўР РЋР С“Р В Р вЂ¦Р В РЎвЂўР В Р вЂ Р В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ"
+        }
+        cue::TEMPERATURE => {
+            "Р РЋРІР‚С™Р В Р’ВµР В РЎВР В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’В°Р РЋРІР‚С™Р РЋРЎвЂњР РЋР вЂљР В Р’В°"
+        }
+        cue::VISUAL => {
+            "Р В Р’В·Р РЋР вЂљР В РЎвЂР РЋРІР‚С™Р В Р’ВµР В Р’В»Р РЋР Р‰Р В Р вЂ¦Р РЋРІР‚в„–Р В РІвЂћвЂ“ Р В РЎвЂўР В Р’В±Р РЋР вЂљР В Р’В°Р В Р’В·"
+        }
+        cue::GRAVITY => {
+            "Р В РЎвЂ“Р РЋР вЂљР В Р’В°Р В Р вЂ Р В РЎвЂР РЋРІР‚С™Р В Р’В°Р РЋРІР‚В Р В РЎвЂР РЋР РЏ"
+        }
+        _ => {
+            "Р В Р’В·Р В Р’В°Р В РЎвЂ”Р В Р’В°Р РЋРІР‚В¦ Р РЋР С“Р В Р’В°Р В РЎВР РЋРІР‚В Р В Р’В°"
+        }
     }
 }
 
 /// Russian label for a motor primitive.
 fn action_name(action_id: i32) -> &'static str {
     match action_id {
-        action::REST => "замереть",
-        action::FORWARD => "лететь вперёд",
-        action::TURN_L => "повернуть налево",
-        action::TURN_R => "повернуть направо",
-        action::UP => "набрать высоту",
-        action::DOWN => "снизиться",
-        action::FLAP => "махать крыльями",
-        action::DANCE => "танцевать",
-        action::EAT => "есть",
-        action::MATE => "ухаживать",
-        _ => "действовать",
+        action::REST => "Р В Р’В·Р В Р’В°Р В РЎВР В Р’ВµР РЋР вЂљР В Р’ВµР РЋРІР‚С™Р РЋР Р‰",
+        action::FORWARD => {
+            "Р В Р’В»Р В Р’ВµР РЋРІР‚С™Р В Р’ВµР РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР РЋРІР‚ВР В РўвЂ"
+        }
+        action::TURN_L => {
+            "Р В РЎвЂ”Р В РЎвЂўР В Р вЂ Р В Р’ВµР РЋР вЂљР В Р вЂ¦Р РЋРЎвЂњР РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ¦Р В Р’В°Р В Р’В»Р В Р’ВµР В Р вЂ Р В РЎвЂў"
+        }
+        action::TURN_R => {
+            "Р В РЎвЂ”Р В РЎвЂўР В Р вЂ Р В Р’ВµР РЋР вЂљР В Р вЂ¦Р РЋРЎвЂњР РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ¦Р В Р’В°Р В РЎвЂ”Р РЋР вЂљР В Р’В°Р В Р вЂ Р В РЎвЂў"
+        }
+        action::UP => {
+            "Р В Р вЂ¦Р В Р’В°Р В Р’В±Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В Р вЂ Р РЋРІР‚в„–Р РЋР С“Р В РЎвЂўР РЋРІР‚С™Р РЋРЎвЂњ"
+        }
+        action::DOWN => {
+            "Р РЋР С“Р В Р вЂ¦Р В РЎвЂР В Р’В·Р В РЎвЂР РЋРІР‚С™Р РЋР Р‰Р РЋР С“Р РЋР РЏ"
+        }
+        action::FLAP => {
+            "Р В РЎВР В Р’В°Р РЋРІР‚В¦Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰ Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р В Р’В»Р РЋР Р‰Р РЋР РЏР В РЎВР В РЎвЂ"
+        }
+        action::DANCE => {
+            "Р РЋРІР‚С™Р В Р’В°Р В Р вЂ¦Р РЋРІР‚В Р В Р’ВµР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰"
+        }
+        action::EAT => "Р В Р’ВµР РЋР С“Р РЋРІР‚С™Р РЋР Р‰",
+        action::MATE => {
+            "Р РЋРЎвЂњР РЋРІР‚В¦Р В Р’В°Р В Р’В¶Р В РЎвЂР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰"
+        }
+        _ => {
+            "Р В РўвЂР В Р’ВµР В РІвЂћвЂ“Р РЋР С“Р РЋРІР‚С™Р В Р вЂ Р В РЎвЂўР В Р вЂ Р В Р’В°Р РЋРІР‚С™Р РЋР Р‰"
+        }
     }
 }
 
@@ -879,8 +975,8 @@ impl Brain {
             xp: 0,
             level: 1,
             last_lesson: "",
-            last_outcome: "ожидание",
-            thought: "муха ещё ничего не пробовала".to_owned(),
+            last_outcome: "Р В РЎвЂўР В Р’В¶Р В РЎвЂР В РўвЂР В Р’В°Р В Р вЂ¦Р В РЎвЂР В Р’Вµ",
+            thought: "Р В РЎВР РЋРЎвЂњР РЋРІР‚В¦Р В Р’В° Р В Р’ВµР РЋРІР‚В°Р РЋРІР‚В Р В Р вЂ¦Р В РЎвЂР РЋРІР‚РЋР В Р’ВµР В РЎвЂ“Р В РЎвЂў Р В Р вЂ¦Р В Р’Вµ Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР В Р’В±Р В РЎвЂўР В Р вЂ Р В Р’В°Р В Р’В»Р В Р’В°".to_owned(),
             history: std::collections::VecDeque::with_capacity(HISTORY_LEN),
             mastered: [false; 5],
             id,
@@ -932,7 +1028,9 @@ impl Brain {
                 t: 0.0,
                 fly: self.id,
                 kind: "level_up".to_owned(),
-                text: format!("уровень {new_level}"),
+                text: format!(
+                    "Р РЋРЎвЂњР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’ВµР В Р вЂ¦Р РЋР Р‰ {new_level}"
+                ),
             });
         }
         self.level = new_level;
@@ -940,9 +1038,9 @@ impl Brain {
         self.mastery = self.mastery * 0.9 + f32::from(hit) * 0.1;
         self.last_lesson = act.id;
         self.last_outcome = match result.outcome {
-            tfly::TrialOutcome::Correct => "верно",
-            tfly::TrialOutcome::Partial => "почти",
-            tfly::TrialOutcome::Wrong => "ошибка",
+            tfly::TrialOutcome::Correct => "Р В Р вЂ Р В Р’ВµР РЋР вЂљР В Р вЂ¦Р В РЎвЂў",
+            tfly::TrialOutcome::Partial => "Р В РЎвЂ”Р В РЎвЂўР РЋРІР‚РЋР РЋРІР‚С™Р В РЎвЂ",
+            tfly::TrialOutcome::Wrong => "Р В РЎвЂўР РЋРІвЂљВ¬Р В РЎвЂР В Р’В±Р В РЎвЂќР В Р’В°",
         };
 
         // Log the moment a lesson is actually mastered, once.
@@ -954,7 +1052,7 @@ impl Brain {
                     t: 0.0,
                     fly: self.id,
                     kind: "mastered".to_owned(),
-                    text: format!("освоила «{}»", act.lesson),
+                    text: format!("Р В РЎвЂўР РЋР С“Р В Р вЂ Р В РЎвЂўР В РЎвЂР В Р’В»Р В Р’В° Р вЂ™Р’В«{}Р вЂ™Р’В»", act.lesson),
                 });
             } else if self.mastered[act_index] && weight < 0.5 {
                 self.mastered[act_index] = false;
@@ -962,7 +1060,10 @@ impl Brain {
                     t: 0.0,
                     fly: self.id,
                     kind: "forgot".to_owned(),
-                    text: format!("забыла «{}»", act.lesson),
+                    text: format!(
+                        "Р В Р’В·Р В Р’В°Р В Р’В±Р РЋРІР‚в„–Р В Р’В»Р В Р’В° Р вЂ™Р’В«{}Р вЂ™Р’В»",
+                        act.lesson
+                    ),
                 });
             }
         }
@@ -997,37 +1098,37 @@ impl Brain {
 
         if pain > 0.25 {
             return format!(
-                "боль {pain:.0}% перебивает всё — ухожу от источника (урок «{}» забыт)",
+                "Р В Р’В±Р В РЎвЂўР В Р’В»Р РЋР Р‰ {pain:.0}% Р В РЎвЂ”Р В Р’ВµР РЋР вЂљР В Р’ВµР В Р’В±Р В РЎвЂР В Р вЂ Р В Р’В°Р В Р’ВµР РЋРІР‚С™ Р В Р вЂ Р РЋР С“Р РЋРІР‚В Р Р†Р вЂљРІР‚Сњ Р РЋРЎвЂњР РЋРІР‚В¦Р В РЎвЂўР В Р’В¶Р РЋРЎвЂњ Р В РЎвЂўР РЋРІР‚С™ Р В РЎвЂР РЋР С“Р РЋРІР‚С™Р В РЎвЂўР РЋРІР‚РЋР В Р вЂ¦Р В РЎвЂР В РЎвЂќР В Р’В° (Р РЋРЎвЂњР РЋР вЂљР В РЎвЂўР В РЎвЂќ Р вЂ™Р’В«{}Р вЂ™Р’В» Р В Р’В·Р В Р’В°Р В Р’В±Р РЋРІР‚в„–Р РЋРІР‚С™)",
                 act.lesson
             );
         }
         if fear > 0.45 {
             return format!(
-                "страх {fear:.0}% доминирует, план «{}» отложен, гейт {:.0}%",
+                "Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р РЋРІР‚В¦ {fear:.0}% Р В РўвЂР В РЎвЂўР В РЎВР В РЎвЂР В Р вЂ¦Р В РЎвЂР РЋР вЂљР РЋРЎвЂњР В Р’ВµР РЋРІР‚С™, Р В РЎвЂ”Р В Р’В»Р В Р’В°Р В Р вЂ¦ Р вЂ™Р’В«{}Р вЂ™Р’В» Р В РЎвЂўР РЋРІР‚С™Р В Р’В»Р В РЎвЂўР В Р’В¶Р В Р’ВµР В Р вЂ¦, Р В РЎвЂ“Р В Р’ВµР В РІвЂћвЂ“Р РЋРІР‚С™ {:.0}%",
                 act.lesson,
                 gate * 100.0
             );
         }
         if self.fly.is_asleep() {
-            return "сплю, консолидирую associations".to_owned();
+            return "Р РЋР С“Р В РЎвЂ”Р В Р’В»Р РЋР вЂ№, Р В РЎвЂќР В РЎвЂўР В Р вЂ¦Р РЋР С“Р В РЎвЂўР В Р’В»Р В РЎвЂР В РўвЂР В РЎвЂР РЋР вЂљР РЋРЎвЂњР РЋР вЂ№ associations".to_owned();
         }
         if weight < 0.0 {
             return format!(
-                "пробовал «{}» и ошибаюсь: вес {:.0}%, ищу новую стратегию",
+                "Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР В Р’В±Р В РЎвЂўР В Р вЂ Р В Р’В°Р В Р’В» Р вЂ™Р’В«{}Р вЂ™Р’В» Р В РЎвЂ Р В РЎвЂўР РЋРІвЂљВ¬Р В РЎвЂР В Р’В±Р В Р’В°Р РЋР вЂ№Р РЋР С“Р РЋР Р‰: Р В Р вЂ Р В Р’ВµР РЋР С“ {:.0}%, Р В РЎвЂР РЋРІР‚В°Р РЋРЎвЂњ Р В Р вЂ¦Р В РЎвЂўР В Р вЂ Р РЋРЎвЂњР РЋР вЂ№ Р РЋР С“Р РЋРІР‚С™Р РЋР вЂљР В Р’В°Р РЋРІР‚С™Р В Р’ВµР В РЎвЂ“Р В РЎвЂР РЋР вЂ№",
                 act.lesson,
                 weight * 100.0
             );
         }
         if weight < 0.25 {
             return format!(
-                "«{}»: нащупываю, вес {:.0}%, гейт {:.0}%, пробую чаще",
+                "Р вЂ™Р’В«{}Р вЂ™Р’В»: Р В Р вЂ¦Р В Р’В°Р РЋРІР‚В°Р РЋРЎвЂњР В РЎвЂ”Р РЋРІР‚в„–Р В Р вЂ Р В Р’В°Р РЋР вЂ№, Р В Р вЂ Р В Р’ВµР РЋР С“ {:.0}%, Р В РЎвЂ“Р В Р’ВµР В РІвЂћвЂ“Р РЋРІР‚С™ {:.0}%, Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР В Р’В±Р РЋРЎвЂњР РЋР вЂ№ Р РЋРІР‚РЋР В Р’В°Р РЋРІР‚В°Р В Р’Вµ",
                 act.lesson,
                 weight * 100.0,
                 gate * 100.0
             );
         }
         format!(
-            "«{}»: уверенно, вес {:.0}%, гейт {:.0}%, следую плану",
+            "Р вЂ™Р’В«{}Р вЂ™Р’В»: Р РЋРЎвЂњР В Р вЂ Р В Р’ВµР РЋР вЂљР В Р’ВµР В Р вЂ¦Р В Р вЂ¦Р В РЎвЂў, Р В Р вЂ Р В Р’ВµР РЋР С“ {:.0}%, Р В РЎвЂ“Р В Р’ВµР В РІвЂћвЂ“Р РЋРІР‚С™ {:.0}%, Р РЋР С“Р В Р’В»Р В Р’ВµР В РўвЂР РЋРЎвЂњР РЋР вЂ№ Р В РЎвЂ”Р В Р’В»Р В Р’В°Р В Р вЂ¦Р РЋРЎвЂњ",
             act.lesson,
             weight * 100.0,
             gate * 100.0
@@ -1273,7 +1374,7 @@ impl EditorRuntime {
                         fly: self.agents[i].id,
                         kind: "meet".to_owned(),
                         text: format!(
-                            "#{} и #{} {}",
+                            "#{} Р В РЎвЂ #{} {}",
                             self.agents[i].id,
                             self.agents[j].id,
                             tfly::Fly::encounter_name(kind)
@@ -1471,11 +1572,44 @@ impl EditorRuntime {
         }
     }
 
+    /// Every joint, straight from the brain.
+    fn limbs_for(&self, id: u32) -> LimbSnapshot {
+        let Some(brain) = self.brain_of(id) else {
+            let rest = JointsSnapshot {
+                root: 0.0,
+                middle: 0.0,
+                end: 0.0,
+                spread: 0.0,
+            };
+            return LimbSnapshot {
+                leg_l: rest,
+                leg_r: rest,
+                arm_l: rest,
+                arm_r: rest,
+                foot_drop: -(RIG_LEG.thigh + RIG_LEG.shin + RIG_LEG.sole_c + RIG_LEG.sole_a),
+            };
+        };
+        let pose = brain.fly.pose();
+        let joints = |j: tfly::Joints| JointsSnapshot {
+            root: j.root,
+            middle: j.middle,
+            end: j.end,
+            spread: j.spread,
+        };
+        LimbSnapshot {
+            leg_l: joints(pose.legs[0]),
+            leg_r: joints(pose.legs[1]),
+            arm_l: joints(pose.arms[0]),
+            arm_r: joints(pose.arms[1]),
+            foot_drop: brain.fly.foot_drop(&RIG_LEG),
+        }
+    }
+
     /// Gesture and relationship state.
     fn social_for(&self, id: u32) -> SocialSnapshot {
         let Some(brain) = self.brain_of(id) else {
             return SocialSnapshot {
-                gesture: "покой".to_owned(),
+                gesture: "Р В РЎвЂ”Р В РЎвЂўР В РЎвЂќР В РЎвЂўР В РІвЂћвЂ“".to_owned(),
                 strength: 0.0,
                 phase: 0.0,
                 bond: 0.0,
@@ -1716,7 +1850,7 @@ impl EditorRuntime {
                     drive: drive.to_owned(),
                     decision: decision.to_owned(),
                     attention: format!(
-                        "odor {:.0}% · light {:.0}% · touch {:.0}%",
+                        "odor {:.0}% Р вЂ™Р’В· light {:.0}% Р вЂ™Р’В· touch {:.0}%",
                         agent.odor * 100.0,
                         agent.light * 100.0,
                         agent.touch * 100.0
@@ -1732,7 +1866,6 @@ impl EditorRuntime {
                     hormone_enabled: agent.hormone_enabled,
                     channel: agent.channel.to_owned(),
                     selected: self.selected == Some(agent.id),
-                    height: 0.0,
                     gait: GaitSnapshot {
                         preset: GAIT_NAMES[agent.gait.min(GAIT_NAMES.len() - 1)].to_owned(),
                         phase: agent.gait_phase,
@@ -1747,6 +1880,7 @@ impl EditorRuntime {
                     affect,
                     face: self.face_for(agent.id),
                     posture: self.posture_for(agent.id),
+                    limbs: self.limbs_for(agent.id),
                     social: self.social_for(agent.id),
                 }
             })
@@ -1888,7 +2022,7 @@ impl EditorRuntime {
                     t: 0.0,
                     fly: 0,
                     kind: "act".to_owned(),
-                    text: format!("все на сцене: {}", act.name),
+                    text: format!("Р В Р вЂ Р РЋР С“Р В Р’Вµ Р В Р вЂ¦Р В Р’В° Р РЋР С“Р РЋРІР‚В Р В Р’ВµР В Р вЂ¦Р В Р’Вµ: {}", act.name),
                 });
             }
             // Train the selected fly hard in its current act, for a burst of
@@ -1933,7 +2067,7 @@ impl EditorRuntime {
                         // level-up lines are rate limited and a burst may
                         // cross many levels at once.
                         text: format!(
-                            "тренировка ×{burst} в «{}» → уровень {}",
+                            "Р РЋРІР‚С™Р РЋР вЂљР В Р’ВµР В Р вЂ¦Р В РЎвЂР РЋР вЂљР В РЎвЂўР В Р вЂ Р В РЎвЂќР В Р’В° Р вЂњРІР‚вЂќ{burst} Р В Р вЂ  Р вЂ™Р’В«{}Р вЂ™Р’В» Р Р†РІР‚В РІР‚в„ў Р РЋРЎвЂњР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’ВµР В Р вЂ¦Р РЋР Р‰ {}",
                             act.name, self.brains[index].level
                         ),
                     });
@@ -1946,9 +2080,9 @@ impl EditorRuntime {
                     fly: 0,
                     kind: "training".to_owned(),
                     text: if self.training {
-                        "автообучение включено".to_owned()
+                        "Р В Р’В°Р В Р вЂ Р РЋРІР‚С™Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРЎвЂњР РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ Р В Р вЂ Р В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂў".to_owned()
                     } else {
-                        "автообучение выключено".to_owned()
+                        "Р В Р’В°Р В Р вЂ Р РЋРІР‚С™Р В РЎвЂўР В РЎвЂўР В Р’В±Р РЋРЎвЂњР РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂР В Р’Вµ Р В Р вЂ Р РЋРІР‚в„–Р В РЎвЂќР В Р’В»Р РЋР вЂ№Р РЋРІР‚РЋР В Р’ВµР В Р вЂ¦Р В РЎвЂў".to_owned()
                     },
                 });
             }
@@ -1968,7 +2102,10 @@ impl EditorRuntime {
                         t: 0.0,
                         fly: id,
                         kind: "pain".to_owned(),
-                        text: format!("боль {:.0}% в левое крыло", intensity * 100.0),
+                        text: format!(
+                            "Р В Р’В±Р В РЎвЂўР В Р’В»Р РЋР Р‰ {:.0}% Р В Р вЂ  Р В Р’В»Р В Р’ВµР В Р вЂ Р В РЎвЂўР В Р’Вµ Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р В Р’В»Р В РЎвЂў",
+                            intensity * 100.0
+                        ),
                     });
                 }
             }
@@ -2012,7 +2149,7 @@ impl EditorRuntime {
                         t: 0.0,
                         fly: id,
                         kind: "unlearn".to_owned(),
-                        text: "ассоциации стёрты".to_owned(),
+                        text: "Р В Р’В°Р РЋР С“Р РЋР С“Р В РЎвЂўР РЋРІР‚В Р В РЎвЂР В Р’В°Р РЋРІР‚В Р В РЎвЂР В РЎвЂ Р РЋР С“Р РЋРІР‚С™Р РЋРІР‚ВР РЋР вЂљР РЋРІР‚С™Р РЋРІР‚в„–".to_owned(),
                     });
                 }
             }
@@ -2037,7 +2174,7 @@ impl EditorRuntime {
                         fly: brain.id,
                         kind: "walk".to_owned(),
                         text: format!(
-                            "ходьба ×{burst}, походка «{}» освоена на {:.0}%",
+                            "Р РЋРІР‚В¦Р В РЎвЂўР В РўвЂР РЋР Р‰Р В Р’В±Р В Р’В° Р вЂњРІР‚вЂќ{burst}, Р В РЎвЂ”Р В РЎвЂўР РЋРІР‚В¦Р В РЎвЂўР В РўвЂР В РЎвЂќР В Р’В° Р вЂ™Р’В«{}Р вЂ™Р’В» Р В РЎвЂўР РЋР С“Р В Р вЂ Р В РЎвЂўР В Р’ВµР В Р вЂ¦Р В Р’В° Р В Р вЂ¦Р В Р’В° {:.0}%",
                             GAIT_NAMES[best.max(0) as usize],
                             mastery * 100.0
                         ),
@@ -2084,7 +2221,7 @@ impl EditorRuntime {
                             fly: self.agents[a].id,
                             kind: "meet".to_owned(),
                             text: format!(
-                                "#{} и #{} {}",
+                                "#{} Р В РЎвЂ #{} {}",
                                 self.agents[a].id,
                                 self.agents[b].id,
                                 tfly::Fly::encounter_name(kind)
@@ -2095,7 +2232,9 @@ impl EditorRuntime {
                             t: 0.0,
                             fly: self.agents[a].id,
                             kind: "meet".to_owned(),
-                            text: "не сейчас, кулдаун".to_owned(),
+                            text:
+                                "Р В Р вЂ¦Р В Р’Вµ Р РЋР С“Р В Р’ВµР В РІвЂћвЂ“Р РЋРІР‚РЋР В Р’В°Р РЋР С“, Р В РЎвЂќР РЋРЎвЂњР В Р’В»Р В РўвЂР В Р’В°Р РЋРЎвЂњР В Р вЂ¦"
+                                    .to_owned(),
                         });
                     }
                 }
@@ -2120,9 +2259,9 @@ impl EditorRuntime {
                         fly: id,
                         kind: "sleep".to_owned(),
                         text: if self.brains[index].fly.is_asleep() {
-                            "уснула".to_owned()
+                            "Р РЋРЎвЂњР РЋР С“Р В Р вЂ¦Р РЋРЎвЂњР В Р’В»Р В Р’В°".to_owned()
                         } else {
-                            "проснулась".to_owned()
+                            "Р В РЎвЂ”Р РЋР вЂљР В РЎвЂўР РЋР С“Р В Р вЂ¦Р РЋРЎвЂњР В Р’В»Р В Р’В°Р РЋР С“Р РЋР Р‰".to_owned()
                         },
                     });
                 }
@@ -2138,7 +2277,7 @@ impl EditorRuntime {
                         t: 0.0,
                         fly: id,
                         kind: "startle".to_owned(),
-                        text: "испуг".to_owned(),
+                        text: "Р В РЎвЂР РЋР С“Р В РЎвЂ”Р РЋРЎвЂњР В РЎвЂ“".to_owned(),
                     });
                 }
             }
@@ -2174,7 +2313,7 @@ impl EditorRuntime {
                             t: 0.0,
                             fly: 0,
                             kind: "logfile".to_owned(),
-                            text: format!("лог открыт: {name}"),
+                            text: format!("Р В Р’В»Р В РЎвЂўР В РЎвЂ“ Р В РЎвЂўР РЋРІР‚С™Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р РЋРІР‚С™: {name}"),
                         });
                     }
                     _ => {
@@ -2184,7 +2323,7 @@ impl EditorRuntime {
                             t: 0.0,
                             fly: 0,
                             kind: "logfile".to_owned(),
-                            text: "лог закрыт".to_owned(),
+                            text: "Р В Р’В»Р В РЎвЂўР В РЎвЂ“ Р В Р’В·Р В Р’В°Р В РЎвЂќР РЋР вЂљР РЋРІР‚в„–Р РЋРІР‚С™".to_owned(),
                         });
                     }
                 }
@@ -2575,7 +2714,7 @@ mod tests {
         let brain = snapshot.brain.expect("brain snapshot");
         assert!(brain.pain > 0.1, "pain must register: {}", brain.pain);
         assert!(
-            brain.thought.contains("боль"),
+            brain.thought.contains("Р В Р’В±Р В РЎвЂўР В Р’В»Р РЋР Р‰"),
             "the trace must mention pain, got: {}",
             brain.thought
         );
@@ -2775,10 +2914,10 @@ mod tests {
             "the burst should have levelled the fly up, got {level}"
         );
         assert!(
-            runtime
-                .log
-                .iter()
-                .any(|e| e.kind == "train" && e.text.contains(&format!("уровень {level}"))),
+            runtime.log.iter().any(|e| e.kind == "train"
+                && e.text.contains(&format!(
+                    "Р РЋРЎвЂњР РЋР вЂљР В РЎвЂўР В Р вЂ Р В Р’ВµР В Р вЂ¦Р РЋР Р‰ {level}"
+                ))),
             "the training line must state the level actually reached ({level})"
         );
     }
@@ -3061,6 +3200,70 @@ mod tests {
             runtime.brains[1].fly.look().2 > 0.0,
             "the partner looks back"
         );
+    }
+
+    #[test]
+    fn the_two_foot_drop_formulas_agree() {
+        // The core answers "how high is the foot" from the joint angles, and the
+        // rig answers it again from the angles it is about to apply. Two
+        // implementations of one question is a drift risk, so they are compared
+        // here over a spread of real poses rather than trusted.
+        //
+        // The rig's copy is in editor/app.js as footDrop(). If this fails, the
+        // two have parted company and the feet will be in the wrong place.
+        let mut fly = tfly::Fly::new();
+        fly.seed(5);
+        for gait in 0..4 {
+            fly.set_gait(gait);
+            for step in 0..64 {
+                fly.set_phase(step as f32 * std::f32::consts::TAU / 64.0);
+                let pose = fly.pose();
+                for leg in pose.legs {
+                    let knee = leg.root + leg.middle;
+                    // The ankle angle is absolute, so it is used as given.
+                    let theta = leg.end;
+                    let vertical = RIG_LEG.sole_a * theta.cos();
+                    let along = RIG_LEG.sole_b * theta.sin();
+                    let rig = -(RIG_LEG.thigh * leg.root.cos()
+                        + RIG_LEG.shin * knee.cos()
+                        + (RIG_LEG.sole_c * theta.cos() + RIG_LEG.sole_f * theta.sin())
+                        + (vertical * vertical + along * along).sqrt());
+                    let core = fly.foot_drop_for(&leg, &RIG_LEG);
+                    assert!(
+                        (rig - core).abs() < 0.002,
+                        "gait {gait}: the rig puts the foot at {rig} and the core at {core}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_reported_foot_drop_is_always_usable() {
+        // The rig places the body by taking the lower of the two feet and
+        // putting it on the floor. That only works if the number it is handed
+        // is always a sane drop: negative, and inside what a leg can reach.
+        // A positive or absurd value would drop the character through the
+        // floor or launch her into the air.
+        let mut runtime = EditorRuntime::new(3);
+        let straight = -(RIG_LEG.thigh + RIG_LEG.shin + RIG_LEG.sole_c + RIG_LEG.sole_a);
+        for _ in 0..3000 {
+            runtime.step(FIXED_DT);
+        }
+        let snapshot = runtime.snapshot(60.0);
+        for agent in &snapshot.agents {
+            let drop = agent.limbs.foot_drop;
+            assert!(
+                drop < 0.0,
+                "#{}: the foot must be below the hip, got {drop}",
+                agent.id
+            );
+            assert!(
+                drop > straight - 0.05,
+                "#{}: the leg cannot reach that far, got {drop} against {straight}",
+                agent.id
+            );
+        }
     }
 
     #[test]

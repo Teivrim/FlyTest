@@ -67,6 +67,35 @@ extern "C" {
 #define TFLY_N_PULSE 8
 /* Gait presets a fly can learn to walk with. */
 #define TFLY_N_GAIT 4
+/* Limbs the walk drives. Two legs and two arms, matching the rig. */
+#define TFLY_N_LIMB 4
+/* Limbs. Order matters: the rig indexes its pivots with these. */
+enum {
+    T_LIMB_LEG_L = 0,
+    T_LIMB_LEG_R,
+    T_LIMB_ARM_L,
+    T_LIMB_ARM_R,
+    T_LIMB_END
+};
+
+/*
+ * Joint angles for one limb, in radians.
+ *
+ * A walk is not a single swinging number. It is a set of joint trajectories
+ * that happen to fit together, and a rig that only receives the swing cannot
+ * bend a knee, so the shin drags through the floor on every forward step.
+ *
+ * The two legs are out of phase with each other, and each arm is out of phase
+ * with the leg on its own side, which is the whole reason a biped looks like it
+ * is walking rather than being dragged.
+ */
+typedef struct {
+    float root;   /* hip or shoulder swing */
+    float middle; /* knee or elbow bend */
+    float end;    /* ankle or wrist */
+    float spread; /* sideways splay */
+} TFLYLimb;
+
 /* Named gestures the rig can pose. */
 #define TFLY_N_GESTURE 8
 /* Kinds of encounter between two flies. */
@@ -812,6 +841,170 @@ static inline const char *TFlyGaitName(int g) {
         case 2: return "длинный";
         default: return "петляющий";
     }
+}
+
+/* How much of the cycle a foot spends on the ground. The rest is the swing. */
+#define TFLY_STANCE 0.62f
+
+/*
+ * The joint trajectory for one leg, as a function of where in its own cycle
+ * the leg is, u in 0..1.
+ *
+ * The shape is the one a real gait has: a straight-ish leg driving back
+ * through stance, a knee that folds only during the swing to clear the ground,
+ * and a foot that rolls from heel to toe on the way off. A knee that bent
+ * during stance would be a limping lurch, and one that never bent would drag
+ * a toe.
+ */
+static inline void TLegPose(float u, float stride, float lift, float splay, TFLYLimb *out) {
+    u = u - floorf(u);
+    /* Stride scales the swing; a short step is a short swing, not a fast one. */
+    float amp = 0.30f + 0.45f * stride;
+    /* Hip: a cosine reads as smooth, and the hip really is smooth. */
+    out->root = amp * cosf(6.2831853f * u);
+
+    if (u < TFLY_STANCE) {
+        /* Stance. The knee is nearly straight and flexes once, around
+         * mid-stance, to take the shock of landing. */
+        float s = u / TFLY_STANCE;
+        out->middle = 0.16f * lift * sinf(3.1415927f * s);
+    } else {
+        /* Swing. The knee folds hard in the middle of the swing and straightens
+         * again to reach out for the next step. */
+        float s = (u - TFLY_STANCE) / (1.0f - TFLY_STANCE);
+        out->middle = (0.25f + 1.75f * lift) * sinf(3.1415927f * s);
+    }
+    /* The ankle rolls: up at heel strike, down through the roll, up again as
+     * the foot is lifted clear.
+     *
+     * This is the *absolute* angle of the ankle, not a bend relative to the
+     * shin. A relative angle has to be added up by whoever applies it, and
+     * getting that addition wrong in one place and not the other puts the foot
+     * somewhere nobody asked for. The rig reads it as given. */
+    float bend = 0.22f * cosf(6.2831853f * (u - 0.15f)) - 0.10f * sinf(12.5663706f * u);
+    out->end = out->root + out->middle + bend;
+    /* Feet splay outward a little, and a weaving walk splays them further. */
+    out->spread = 0.06f + 0.22f * splay;
+}
+
+/* The joint trajectory for one arm, over its own cycle u in 0..1. */
+static inline void TArmPose(float u, float swing, float bend, float splay, TFLYLimb *out) {
+    u = u - floorf(u);
+    float amp = 0.20f + 0.40f * swing;
+    /* The shoulder opposes the leg on the same side. The caller already
+     * supplies the half-cycle offset that does this; negating here as well
+     * would cancel it and leave the arm swinging with its own leg, which is
+     * exactly the marionette look this is meant to avoid. */
+    out->root = amp * cosf(6.2831853f * u);
+    /* The elbow is never straight in a walk: it folds more as the arm comes
+     * forward, which is what stops the swing reading as a pendulum. */
+    out->middle = 0.30f + bend * (0.5f + 0.5f * cosf(6.2831853f * (u - 0.25f)));
+    /* Absolute wrist angle, for the same reason the ankle is absolute. */
+    out->end = out->root + out->middle + 0.20f * cosf(6.2831853f * u);
+    out->spread = 0.10f + 0.30f * splay;
+}
+
+/*
+ * Every joint of every limb, right now.
+ *
+ * The arms are not merely offset copies of the legs. A fly that is losing its
+ * balance flails them at a rate unrelated to her stride, because that is what
+ * balancing is: the arms are a separate actuator. This is where independent
+ * control comes from.
+ */
+static inline void TGaitLimbs(const TFLY *fly, TFLYLimb out[TFLY_N_LIMB]) {
+    if (fly == NULL || out == NULL) return;
+    float stride = TClamp(fly->gait_stride, 0.0f, 1.0f);
+    float sway = TClamp(fly->gait_sway, 0.0f, 1.0f);
+    float balance = TClamp(fly->balance, 0.0f, 1.0f);
+    /* How fast the phase runs, in cycles per radian of accumulated phase. */
+    float turn = fly->gait_phase / 6.2831853f;
+
+    /* Knees lift more when she is lifting her feet high, which is what a long
+     * stride looks like, and less when she is shuffling. */
+    float lift = 0.25f + 0.75f * stride;
+    /* An unsteady fly cannot hold her arms still, and cannot hold them in
+     * rhythm either. */
+    float flail = 1.0f - balance;
+
+    /* The left leg leads; the right is half a cycle behind. */
+    TLegPose(turn, stride, lift, sway, &out[T_LIMB_LEG_L]);
+    TLegPose(turn + 0.5f, stride, lift, sway, &out[T_LIMB_LEG_R]);
+
+    /* Each arm opposes the leg on its own side, so the left arm is half a
+     * cycle ahead of the left leg. */
+    float swing = stride * balance;
+    float bend = (0.35f + 0.65f * stride) * balance;
+    TArmPose(turn + 0.5f, swing, bend, sway, &out[T_LIMB_ARM_L]);
+    TArmPose(turn, swing, bend, sway, &out[T_LIMB_ARM_R]);
+
+    if (flail > 0.05f) {
+        /* Windmilling. A fast, uneven wobble added on top, so a character who
+         * is about to fall reads as unstable from across the stage. The rate is
+         * tied to the stride but never matches it, which is the point.
+         *
+         * The result is clamped to a range a shoulder can actually reach. A
+         * windmill that hyperextends stops reading as panic and starts reading
+         * as a broken mesh.
+         *
+         * The wrist has to be re-derived afterwards. The joint angles are
+         * absolute, so throwing the shoulder about would leave the wrist
+         * pointing at nothing. */
+        float t = fly->age;
+        float w = flail * flail;
+        TFLYLimb *al = &out[T_LIMB_ARM_L];
+        TFLYLimb *ar = &out[T_LIMB_ARM_R];
+        /* Remember the wrist bend before the shoulders move. */
+        float wrist_l = al->end - al->root - al->middle;
+        float wrist_r = ar->end - ar->root - ar->middle;
+        al->root = TClamp(al->root + 1.7f * w * sinf(t * 9.1f), -1.55f, 1.55f);
+        al->middle =
+            TClamp(al->middle + 0.8f * w * (0.5f + 0.5f * sinf(t * 11.3f + 1.1f)), 0.0f, 2.4f);
+        al->end = al->root + al->middle + wrist_l;
+        ar->root = TClamp(ar->root + 1.7f * w * sinf(t * 9.7f + 2.2f), -1.55f, 1.55f);
+        ar->middle =
+            TClamp(ar->middle + 0.8f * w * (0.5f + 0.5f * sinf(t * 10.7f + 0.4f)), 0.0f, 2.4f);
+        ar->end = ar->root + ar->middle + wrist_r;
+        al->spread = TClamp(al->spread + 0.5f * w, -1.0f, 1.0f);
+        ar->spread = TClamp(ar->spread + 0.5f * w, -1.0f, 1.0f);
+    }
+}
+
+/* Where the lowest foot ends up, relative to the hip, for a given leg pose.
+ *
+ * The rig needs this to stand on the floor instead of sinking into it. Doing
+ * the kinematics here rather than in the renderer keeps the arithmetic in one
+ * place, and the renderer mirrors it exactly, with a test that compares the
+ * two so they cannot drift apart.
+ *
+ * The segment lengths are passed in because they are the renderer's
+ * proportions. The model owns the angles; only the rig knows how long anyone's
+ * bones are.
+ *
+ * The sole is the subtle part. Treating it as a point below the ankle is wrong
+ * by up to a third of a foot, because a foot is long: as the ankle tilts, the
+ * far end of the shoe swings down much further than a point would. So the
+ * sole is treated as an ellipsoid of vertical semi-axis `sole_a` and depth
+ * semi-axis `sole_b`, whose centre sits `sole_c` below and `sole_f` ahead of the
+ * ankle joint, and the drop is its true support distance in the tilted
+ * direction. Anything simpler leaves the character hovering with a folded knee
+ * and sinking when the leg is merely tilted. */
+static inline float TFootDrop(const TFLYLimb *leg, float thigh, float shin, float sole_c,
+                              float sole_a, float sole_b, float sole_f) {
+    if (leg == NULL) return -(thigh + shin + sole_c + sole_a);
+    /* Forward kinematics down the chain: the root swings about the hip, the
+     * knee bends relative to the thigh, and the foot hangs off the ankle. */
+    float knee_angle = leg->root + leg->middle;
+    /* The ankle carries an absolute angle, so it is used as given. */
+    float theta = leg->end;
+    /* Support distance of a rotated ellipse along the vertical. */
+    float vertical = sole_a * cosf(theta);
+    float along = sole_b * sinf(theta);
+    /* The shoe's centre is ahead of the ankle, so tilting swings it down as
+     * well as stretching it away. */
+    return -(thigh * cosf(leg->root) + shin * cosf(knee_angle) +
+             (sole_c * cosf(theta) + sole_f * sinf(theta)) +
+             sqrtf(vertical * vertical + along * along));
 }
 
 /* Apply a preset to the fly's body. This is what the animation reads. */

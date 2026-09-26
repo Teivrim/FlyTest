@@ -186,6 +186,28 @@ unsafe extern "C" {
     fn tfly_look_y(handle: *mut TFlyHandle) -> c_float;
     fn tfly_look_lock(handle: *mut TFlyHandle) -> c_float;
     fn tfly_spine(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_limbs(handle: *mut TFlyHandle, out: *mut c_float);
+    fn tfly_foot_drop(
+        handle: *mut TFlyHandle,
+        thigh: c_float,
+        shin: c_float,
+        sole_c: c_float,
+        sole_a: c_float,
+        sole_b: c_float,
+        sole_f: c_float,
+    ) -> c_float;
+    fn tfly_foot_drop_pose(
+        root: *const c_float,
+        middle: *const c_float,
+        end: *const c_float,
+        thigh: c_float,
+        shin: c_float,
+        sole_c: c_float,
+        sole_a: c_float,
+        sole_b: c_float,
+        sole_f: c_float,
+    ) -> c_float;
+    fn tfly_set_phase(handle: *mut TFlyHandle, phase: c_float);
     fn tfly_shoulder(handle: *mut TFlyHandle) -> c_float;
     fn tfly_lean(handle: *mut TFlyHandle) -> c_float;
     fn tfly_gesture(handle: *mut TFlyHandle) -> c_int;
@@ -370,7 +392,12 @@ pub mod gait {
     pub const WEAVING: i32 = 3;
     pub const COUNT: i32 = 4;
 
-    pub const NAMES: [&str; 4] = ["торопливый", "ровный", "длинный", "петляющий"];
+    pub const NAMES: [&str; 4] = [
+        "РЎвЂљР С•РЎР‚Р С•Р С—Р В»Р С‘Р Р†РЎвЂ№Р в„–",
+        "РЎР‚Р С•Р Р†Р Р…РЎвЂ№Р в„–",
+        "Р Т‘Р В»Р С‘Р Р…Р Р…РЎвЂ№Р в„–",
+        "Р С—Р ВµРЎвЂљР В»РЎРЏРЎР‹РЎвЂ°Р С‘Р в„–",
+    ];
 }
 
 /// Drives, matching `T_DRIVE_*`.
@@ -1286,6 +1313,80 @@ impl Fly {
         unsafe { tfly_lean(self.ptr()) }
     }
 
+    // ---- limbs -------------------------------------------------------
+
+    /// Every joint of every limb, right now.
+    ///
+    /// A walk is a set of joint trajectories, not a single swinging number: a
+    /// rig given only the swing cannot bend a knee, so the shin drags through
+    /// the floor on every forward step.
+    #[must_use]
+    pub fn pose(&self) -> Pose {
+        let mut raw = [0.0f32; limb::COUNT * 4];
+        // SAFETY: `raw` is exactly the size the C side writes, limb::COUNT
+        // limbs of four floats each, and it outlives the call because it is a
+        // local the C function only reads back through the pointer it was
+        // given.
+        unsafe { tfly_limbs(self.ptr(), raw.as_mut_ptr()) };
+        let at = |i: usize| Joints {
+            root: raw[i * 4],
+            middle: raw[i * 4 + 1],
+            end: raw[i * 4 + 2],
+            spread: raw[i * 4 + 3],
+        };
+        Pose {
+            legs: [at(limb::LEG_L), at(limb::LEG_R)],
+            arms: [at(limb::ARM_L), at(limb::ARM_R)],
+        }
+    }
+
+    /// How far below the hip the lower foot reaches, given segment lengths.
+    ///
+    /// The lengths are the renderer's proportions, not the model's, so they are
+    /// passed in. A rig uses this to place its root on the floor instead of
+    /// sinking: the body has to drop by exactly as much as the foot does.
+    #[must_use]
+    pub fn foot_drop(&self, rig: &Sole) -> f32 {
+        unsafe {
+            tfly_foot_drop(
+                self.ptr(),
+                rig.thigh,
+                rig.shin,
+                rig.sole_c,
+                rig.sole_a,
+                rig.sole_b,
+                rig.sole_f,
+            )
+        }
+    }
+
+    /// The same question asked about one specific leg pose, so a caller holding
+    /// its own angles can check them against the model's answer.
+    #[must_use]
+    pub fn foot_drop_for(&self, leg: &Joints, rig: &Sole) -> f32 {
+        // SAFETY: a plain arithmetic call on borrowed floats, no pointers to
+        // the fly and no aliasing.
+        unsafe {
+            tfly_foot_drop_pose(
+                &leg.root,
+                &leg.middle,
+                &leg.end,
+                rig.thigh,
+                rig.shin,
+                rig.sole_c,
+                rig.sole_a,
+                rig.sole_b,
+                rig.sole_f,
+            )
+        }
+    }
+
+    /// Set the walk phase directly, for tests and for the editor scrubbing
+    /// through a cycle.
+    pub fn set_phase(&mut self, phase: f32) {
+        unsafe { tfly_set_phase(self.ptr(), phase) }
+    }
+
     // ---- gesture and social -------------------------------------------
 
     /// The pose currently being held, from the `gesture` module.
@@ -1372,6 +1473,61 @@ impl Fly {
         out.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
         out
     }
+}
+
+/// Limbs the walk drives, in C-core order.
+pub mod limb {
+    pub const LEG_L: usize = 0;
+    pub const LEG_R: usize = 1;
+    pub const ARM_L: usize = 2;
+    pub const ARM_R: usize = 3;
+    /// How many there are.
+    pub const COUNT: usize = 4;
+}
+
+/// The four joints of one limb, in radians.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Joints {
+    /// Hip or shoulder swing.
+    pub root: f32,
+    /// Knee or elbow bend. Never negative: a knee does not bend backwards.
+    pub middle: f32,
+    /// Ankle or wrist.
+    pub end: f32,
+    /// Sideways splay.
+    pub spread: f32,
+}
+
+/// The joints of all four limbs.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Pose {
+    pub legs: [Joints; 2],
+    pub arms: [Joints; 2],
+}
+
+/// The rig's leg dimensions, which the model needs in order to answer "how far
+/// below the hip is the foot".
+///
+/// The sole is an ellipsoid rather than a point, and that is the whole reason
+/// this is three numbers instead of one. A foot is long: as the ankle tilts, its
+/// far end swings down far enough that a point below the ankle overestimates
+/// the foot's height by most of a foot, and the character visibly hovers
+/// whenever her knee folds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sole {
+    /// Hip to knee.
+    pub thigh: f32,
+    /// Knee to ankle.
+    pub shin: f32,
+    /// How far the sole's centre sits below the ankle.
+    pub sole_c: f32,
+    /// The sole's vertical semi-axis.
+    pub sole_a: f32,
+    /// The sole's depth semi-axis, which is the long one.
+    pub sole_b: f32,
+    /// How far the sole's centre sits ahead of the ankle, which is what swings
+    /// it down as the ankle tilts.
+    pub sole_f: f32,
 }
 
 /// Result of an encounter between two flies.

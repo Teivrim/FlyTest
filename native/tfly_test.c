@@ -10,6 +10,7 @@
  */
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <math.h>
 #include <string.h>
 
@@ -24,6 +25,15 @@ static void check(int condition, const char *what) {
         printf("  FAIL %s\n", what);
         failures++;
     }
+}
+
+static void checkf(int condition, const char *fmt, ...) {
+    va_list args;
+    char what[256];
+    va_start(args, fmt);
+    vsnprintf(what, sizeof what, fmt, args);
+    va_end(args);
+    check(condition, what);
 }
 
 static void check_near(float a, float b, float tol, const char *what) {
@@ -866,6 +876,183 @@ static void test_encounters(void) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Limbs. A walk is a set of joint trajectories, not a swinging number,
+ * and the properties that make it read as walking are all testable.
+ * ------------------------------------------------------------------ */
+static void test_limbs(void) {
+    printf("limbs\n");
+
+    TFLY fly;
+    TNew(&fly);
+    TSeed(&fly, 5);
+    TSetGait(&fly, 1); /* steady */
+    TFLYLimb l[TFLY_N_LIMB];
+
+    /* The two legs must be half a cycle apart, or she is hopping. */
+    fly.gait_phase = 0.0f;
+    TGaitLimbs(&fly, l);
+    check(l[T_LIMB_LEG_L].root > 0.3f, "the left leg starts forward");
+    check(l[T_LIMB_LEG_R].root < -0.3f, "and the right leg starts back");
+    check(fabsf(l[T_LIMB_LEG_L].root + l[T_LIMB_LEG_R].root) < 1e-5f,
+          "the two legs are exactly opposed");
+
+    /* Each arm must move against the leg on its own side. Getting this wrong
+     * is what makes a biped look like it is being pulled along. */
+    check(l[T_LIMB_ARM_L].root * l[T_LIMB_LEG_L].root < 0.0f,
+          "the left arm opposes the left leg");
+    check(l[T_LIMB_ARM_R].root * l[T_LIMB_LEG_R].root < 0.0f,
+          "the right arm opposes the right leg");
+
+    /* The knee folds during the swing and not during the stance. A knee that
+     * bent while the foot was planted would be a limp, and one that never bent
+     * would drag a toe. */
+    fly.gait_phase = 0.0f;
+    TGaitLimbs(&fly, l);
+    float at_strike = l[T_LIMB_LEG_L].middle;
+    fly.gait_phase = 6.2831853f * 0.30f;
+    TGaitLimbs(&fly, l);
+    float mid_stance = l[T_LIMB_LEG_L].middle;
+    fly.gait_phase = 6.2831853f * 0.80f;
+    TGaitLimbs(&fly, l);
+    float mid_swing = l[T_LIMB_LEG_L].middle;
+    check(at_strike < 0.2f, "the knee is straight at heel strike");
+    check(mid_stance < 0.35f, "and barely bends through stance");
+    check(mid_swing > 0.8f, "but folds hard during the swing");
+
+    /* The foot must actually clear the ground during the swing, or the
+     * character drags. */
+    float lowest = 0.0f, highest = 0.0f;
+    for (int i = 0; i < 200; i++) {
+        fly.gait_phase = 6.2831853f * i / 200.0f;
+        TGaitLimbs(&fly, l);
+        float drop = TFootDrop(&l[T_LIMB_LEG_L], 0.10f, 0.10f, 0.017f, 0.0192f, 0.0432f, 0.020f);
+        if (drop < lowest) lowest = drop;
+        if (drop > highest) highest = drop;
+    }
+    checkf(highest - lowest > 0.08f, "the foot clears the ground while swinging (%.4f)",
+           highest - lowest);
+    checkf(lowest < -0.15f, "and reaches the ground on the stance (%.4f)", lowest);
+
+    /* The foot never goes below the length of the leg, which would mean the
+     * chain had folded through itself. */
+    check(lowest > -(0.10f + 0.10f) - 0.05f, "the leg never folds through itself");
+
+    /* Losing balance must make the arms move independently of the stride. If
+     * they merely followed the legs, a falling character would look like a
+     * falling statue. */
+    fly.balance = 1.0f;
+    fly.gait_phase = 1.0f;
+    TGaitLimbs(&fly, l);
+    float calm_root = l[T_LIMB_ARM_L].root;
+    float calm_elbow = l[T_LIMB_ARM_L].middle;
+    fly.balance = 0.05f;
+    fly.age = 0.20f;
+    TGaitLimbs(&fly, l);
+    check(fabsf(l[T_LIMB_ARM_L].root - calm_root) > 0.3f,
+          "an unsteady fly throws her arms about");
+    check(fabsf(l[T_LIMB_ARM_L].middle - calm_elbow) > 0.1f,
+          "and the elbows go with them");
+
+    /* A steady fly must not windmill. */
+    fly.balance = 1.0f;
+    fly.age = 0.20f;
+    TGaitLimbs(&fly, l);
+    check(fabsf(l[T_LIMB_ARM_L].root - calm_root) < 0.2f,
+          "a steady fly keeps her arms in rhythm");
+
+    /* Every joint of every limb stays somewhere a limb can reach, across all
+     * four gaits and all phases. The ankle and wrist carry absolute angles, so
+     * what has to stay small is their *articulation*: the bend they add on top
+     * of the two joints above them. */
+    TFLY w;
+    TNew(&w);
+    float max_root = 0.0f, max_mid = 0.0f, max_end = 0.0f, max_spread = 0.0f;
+    for (int g = 0; g < TFLY_N_GAIT; g++) {
+        TSetGait(&w, g);
+        for (int i = 0; i < 3000; i++) {
+            w.age += 1.0f / 60.0f;
+            w.gait_phase += 0.1f;
+            w.balance = (i % 200 < 100) ? 1.0f : 0.05f;
+            TGaitLimbs(&w, l);
+            for (int k = 0; k < TFLY_N_LIMB; k++) {
+                if (fabsf(l[k].root) > max_root) max_root = fabsf(l[k].root);
+                if (fabsf(l[k].middle) > max_mid) max_mid = fabsf(l[k].middle);
+                float articulation = l[k].end - l[k].root - l[k].middle;
+                if (fabsf(articulation) > max_end) max_end = fabsf(articulation);
+                if (fabsf(l[k].spread) > max_spread) max_spread = fabsf(l[k].spread);
+            }
+        }
+    }
+    checkf(max_root < 1.6f, "the shoulder never hyperextends (%.3f)", max_root);
+    checkf(max_mid < 2.4f, "the knee and elbow stay inside their bend (%.3f)", max_mid);
+    checkf(max_end < 0.5f, "the ankle and wrist articulate only a little (%.3f)", max_end);
+    checkf(max_spread < 1.0f, "the limbs stay beside the body (%.3f)", max_spread);
+
+    /* A longer stride lifts the foot higher, which is the whole difference
+     * between a march and a shuffle. The measure is the range of the foot over
+     * a cycle, not its height: the drop is always negative, so a maximum
+     * initialised to zero would never move. */
+    TFLY shuf, march;
+    TNew(&shuf);
+    TNew(&march);
+    TSetGait(&shuf, 0); /* hurried: short steps */
+    TSetGait(&march, 2); /* long stride */
+    float shuf_lo = 0.0f, shuf_hi = 0.0f, march_lo = 0.0f, march_hi = 0.0f;
+    int first = 1;
+    for (int i = 0; i < 400; i++) {
+        float ph = 6.2831853f * i / 400.0f;
+        shuf.gait_phase = ph;
+        TGaitLimbs(&shuf, l);
+        float d = TFootDrop(&l[T_LIMB_LEG_L], 0.10f, 0.10f, 0.017f, 0.0192f, 0.0432f, 0.020f);
+        if (first) {
+            shuf_lo = shuf_hi = d;
+            march_lo = march_hi = d;
+            first = 0;
+        }
+        if (d < shuf_lo) shuf_lo = d;
+        if (d > shuf_hi) shuf_hi = d;
+        march.gait_phase = ph;
+        TGaitLimbs(&march, l);
+        d = TFootDrop(&l[T_LIMB_LEG_L], 0.10f, 0.10f, 0.017f, 0.0192f, 0.0432f, 0.020f);
+        if (d < march_lo) march_lo = d;
+        if (d > march_hi) march_hi = d;
+    }
+    checkf(march_hi - march_lo > shuf_hi - shuf_lo,
+           "a long stride lifts the foot higher (%.4f vs %.4f)", march_hi - march_lo,
+           shuf_hi - shuf_lo);
+
+    /* The foot must never come back up to the hip, which would mean the chain
+     * has folded through itself, and must never drop far past a straight leg
+     * either, which would mean it is stretching. */
+    for (int g = 0; g < TFLY_N_GAIT; g++) {
+        TSetGait(&w, g);
+        for (int i = 0; i < 500; i++) {
+            w.gait_phase = 6.2831853f * i / 500.0f;
+            w.balance = (i % 100 < 50) ? 1.0f : 0.0f;
+            TGaitLimbs(&w, l);
+            for (int k = 0; k < 2; k++) {
+                float d = TFootDrop(&l[k], 0.10f, 0.10f, 0.017f, 0.0192f, 0.0432f, 0.020f);
+                if (d > 0.0f) {
+                    checkf(0, "gait %d: the foot came back up to the hip (%.4f)", g, d);
+                    break;
+                }
+                if (d < -(0.20f + 0.05f)) {
+                    checkf(0, "gait %d: the leg stretched past straight (%.4f)", g, d);
+                    break;
+                }
+            }
+        }
+    }
+    check(1, "the foot stays between the hip and a stretched leg, on every gait");
+
+    /* A null fly must be safe, because a caller can always be wrong. */
+    TGaitLimbs(NULL, l);
+    check(1, "a null fly has no limbs to pose");
+    TFootDrop(NULL, 0.1f, 0.1f, 0.017f, 0.0192f, 0.0432f, 0.020f);
+    check(1, "and no foot to drop");
+}
+
+/* ------------------------------------------------------------------ *
  * Gaze. A decided target has to be able to hold, and alarm has to be
  * able to break it.
  * ------------------------------------------------------------------ */
@@ -939,6 +1126,7 @@ int main(void) {
     test_scenario_nociception();
     test_face();
     test_encounters();
+    test_limbs();
     test_gaze();
 
     printf("\n");
