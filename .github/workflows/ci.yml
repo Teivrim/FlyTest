@@ -53,8 +53,12 @@ jobs:
           if ($found) {
             "MinGW найден: $found"
             $env:PATH = "$found;$env:PATH"
-            $found | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-            $found | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            # В GITHUB_PATH пишутся голые пути, а в GITHUB_ENV — только
+            # пары KEY=VALUE. Путь в GITHUB_ENV ломает разбор всего job:
+            # «Invalid format 'C:\mingw64\bin'». Поэтому только GITHUB_PATH.
+            # Кодировка ascii, потому что utf8 добавляет BOM, и runner
+            # не может разобрать первую строку файла.
+            Add-Content -Path $env:GITHUB_PATH -Value $found -Encoding ascii
             & (Join-Path $found "g++.exe") --version | Select-Object -First 1
           } else {
             "MinGW не найден. Сборка C-ядра невозможна, Rust-часть "
