@@ -228,6 +228,12 @@ pub struct RunnerSnapshot {
     pub id: u32,
     /// She has reached the food this round.
     pub fed: bool,
+    /// The deepest food she reached, counting from the entrance, or none.
+    pub ate_feed: usize,
+    /// How many of the maze's foods she has had.
+    pub ate_count: u32,
+    /// How many there are.
+    pub feeds_total: u32,
     /// How far she is from the food, in stage-local units.
     pub distance: f32,
     /// How much of the way she has come along the route, 0..1. Straight-line
@@ -258,8 +264,16 @@ pub struct CourseSnapshot {
     pub time_left: f32,
     /// Seconds a round lasts.
     pub round_length: f32,
-    /// The food, stage-local.
+    /// The food this round is played for: the first one, which is the nearest.
     pub food: [f32; 2],
+    /// Every food in the maze, nearest the entrance first.
+    ///
+    /// All of them are drawn, and the one a character reaches disappears. A maze
+    /// of a hundred rooms with a single prize at the far end is not a round, it is
+    /// a march, and measuring it showed nothing arriving in any time a circus can
+    /// sit through. So a big maze has several, and how deep she got is the thing
+    /// worth watching.
+    pub feeds: Vec<[f32; 2]>,
     /// Side of one maze cell, so the client can size its own marks to the course
     /// instead of guessing.
     pub cell: f32,
@@ -577,6 +591,13 @@ struct Agent {
     /// applying both at once has her hugging a wall while trying to reach the room
     /// behind her, which is a reliable way to reach no room at all.
     nav_is_place: bool,
+    /// Whether there are walls here to feel along.
+    ///
+    /// On open ground the wall-following rule has nothing to work with: every
+    /// direction reads clear, so it commits to the first one and walks it, which is
+    /// not where the food is. With no maze there is nothing to search, so she is
+    /// pointed at it and left to walk.
+    nav_walls: bool,
     /// A quarter turn to add to her heading, and how long it lasts.
     ///
     /// This is the whole of her wall handling. Without it she walks into a dead
@@ -588,6 +609,14 @@ struct Agent {
     wall_timer: f32,
     /// Whether she has reached the food this round.
     fed: bool,
+    /// The deepest of the maze's foods she has reached, counting from the entrance.
+    ///
+    /// Zero is the nearest one. A maze of a hundred rooms is not finished in a
+    /// round, so the round's question is not "did she arrive" but "how far in did
+    /// she get", and this is the number that answers it.
+    ate_feed: usize,
+    /// How many of the maze's foods she has had.
+    ate_count: u32,
     /// The stage she is on, as centre x, centre z and radius.
     ///
     /// The rim is a real boundary and it belongs with the collision rather than
@@ -873,12 +902,15 @@ impl Agent {
             nav: [0.0, 0.0],
             nav_weight: 0.0,
             nav_is_place: false,
+            nav_walls: false,
             // Every character turns the same way round a wall, which is what
             // makes a troupe traverse a maze instead of milling in it. The sign
             // comes from her id so two characters do not cancel out.
             wall_turn: if id.is_multiple_of(2) { 1.0 } else { -1.0 },
             wall_timer: 0.0,
             fed: false,
+            ate_feed: usize::MAX,
+            ate_count: 0,
             stage: [0.0, 0.0, 0.0],
             stuck: 0.0,
             stuck_way: 1.0,
@@ -1155,7 +1187,7 @@ impl Agent {
             self.position[1] += uy * slice;
             self.slide_out_of_solids();
         }
-        for (axis, limit) in [(0, 9.2), (1, 9.2)] {
+        for (axis, limit) in [(0, WORLD_LIMIT), (1, WORLD_LIMIT)] {
             self.position[axis] = self.position[axis].clamp(-limit, limit);
         }
     }
@@ -1166,8 +1198,8 @@ impl Agent {
         self.light = (0.5 + 0.35 * (time * 0.7).sin()).clamp(0.0, 1.0);
         self.odor = (0.5 + 0.3 * (time * 0.43 + self.id as f32 * 0.17).sin()).clamp(0.0, 1.0);
         self.temperature = (0.5 + 0.15 * (time * 0.2).sin()).clamp(0.0, 1.0);
-        let boundary = ((self.position[0].abs() - 8.0).max(0.0)
-            + (self.position[1].abs() - 8.0).max(0.0))
+        let boundary = ((self.position[0].abs() - WORLD_LIMIT).max(0.0)
+            + (self.position[1].abs() - WORLD_LIMIT).max(0.0))
         .clamp(0.0, 1.0);
         self.touch = ((self.velocity[0].abs() + self.velocity[1].abs()) * 0.2 + boundary * 0.8)
             .clamp(0.0, 1.0);
@@ -1216,7 +1248,7 @@ impl Agent {
         // every maze for the whole round with a remembered destination and no way
         // of walking to it.
         if self.nav_weight > 0.0 {
-            if !self.nav_is_place {
+            if !self.nav_is_place && self.nav_walls {
                 let chosen = self.search_heading([to_seek_x, to_seek_y]);
                 aimed_x = chosen[0];
                 aimed_y = chosen[1];
@@ -1336,7 +1368,7 @@ impl Agent {
         }
 
         // Bound the arena generously, since the act stages sit at +-6.4.
-        for (axis, limit) in [(0, 9.2), (1, 9.2)] {
+        for (axis, limit) in [(0, WORLD_LIMIT), (1, WORLD_LIMIT)] {
             if self.position[axis].abs() > limit {
                 self.position[axis] = self.position[axis].clamp(-limit, limit);
                 self.velocity[axis] *= -0.45;
@@ -1472,46 +1504,35 @@ pub struct Act {
     pub stage_height: f32,
     /// Solids on the stage, in act-local coordinates.
     pub colliders: &'static [Collider],
+    /// How many cells across this district's maze should be.
+    ///
+    /// Zero means open ground with no maze at all, which is the hill: a fly wakes
+    /// up there, and the one thing that district must not have is somewhere to be
+    /// lost. Everything else is a maze to be got through.
+    pub maze_cells: usize,
 }
 
-/// The four corner posts every stage shares, on a ring of radius 1.5 at the
-/// diagonals. Written out rather than computed, because `cos` is not const and
-/// four numbers beat a helper that cannot run.
+/// The four corner posts every district shares, on a ring at the diagonals.
+/// Written out rather than computed, because `cos` is not const and four numbers
+/// beat a helper that cannot run.
 static CORNER_POSTS: [Collider; 4] = [
-    at(1.06066, 1.06066, 0.10),
-    at(-1.06066, 1.06066, 0.10),
-    at(-1.06066, -1.06066, 0.10),
-    at(1.06066, -1.06066, 0.10),
+    at(3.30, 3.30, 0.10),
+    at(-3.30, 3.30, 0.10),
+    at(-3.30, -3.30, 0.10),
+    at(3.30, -3.30, 0.10),
 ];
 
-/// The four walls of the labyrinth, on a ring inside the posts, with gaps
-/// between them to weave through.
+/// The tree on the hill: a trunk she can bump into, and the one landmark a fly
+/// learns to find her way back to.
 ///
-/// There were five, wider and further in, and they left a clear centre of
-/// 0.39 inside a 1.7 stage. That is not a floor, it is a wall of walls: a
-/// character standing in the middle was permanently wedged against one. The
-/// maze has to be walkable or it is just scenery nobody can get past.
-static LABYRINTH_WALLS: [Collider; 4] = [
-    at(1.15, 0.0, 0.40),
-    at(0.0, 1.15, 0.40),
-    at(-1.15, 0.0, 0.40),
-    at(0.0, -1.15, 0.40),
-];
-
-/// The stems of the garden, on a wider ring.
-static GARDEN_STEMS: [Collider; 7] = [
-    at(1.15, 0.0, 0.16),
-    at(0.6983, 0.9125, 0.16),
-    at(-0.4924, 1.0402, 0.16),
-    at(-1.1117, 0.3044, 0.16),
-    at(-1.1117, -0.3044, 0.16),
-    at(-0.4924, -1.0402, 0.16),
-    at(0.6983, -0.9125, 0.16),
-];
+/// It is the only solid on the hill besides the posts, because the hill has no
+/// maze and nothing else to walk into. A newborn fly with one thing in the world
+/// to learn has somewhere to be lost and somewhere to get back to.
+static HILL_TREE: [Collider; 1] = [at(1.9, -1.4, 0.62)];
 
 /// How many solids an act can hold. The four posts every stage shares, plus
 /// whatever the act puts on top of them.
-const MAX_SOLIDS: usize = 12;
+const MAX_SOLIDS: usize = 8;
 
 /// Pad with a collider of zero radius, parked far outside every stage, so an
 /// unused slot can never push a character anywhere.
@@ -1536,13 +1557,36 @@ const fn solids_with(extra: &[Collider]) -> [Collider; MAX_SOLIDS] {
     out
 }
 
-static LABYRINTH_SOLIDS: [Collider; MAX_SOLIDS] = solids_with(&LABYRINTH_WALLS);
-static GARDEN_SOLIDS: [Collider; MAX_SOLIDS] = solids_with(&GARDEN_STEMS);
+/// Scenery for the districts that have any.
+///
+/// The hill has the tree. The rest are mazes, and their walls come from the course
+/// and are rebuilt every round, so there is nothing fixed to list here.
+static HILL_SOLIDS: [Collider; MAX_SOLIDS] = solids_with(&HILL_TREE);
+static OPEN_SOLIDS: [Collider; MAX_SOLIDS] = solids_with(&[]);
 
-/// Height of every stage top above the tent floor.
+/// Height of every district's ground above the world floor.
 const STAGE_HEIGHT: f32 = 0.17;
-/// Radius of every stage top.
-const STAGE_RADIUS: f32 = 1.7;
+
+/// How big a district is.
+///
+/// It was 1.7, and that is what held the maze at four cells across. The cell size
+/// is set by how much room a passage has to give a character, not by how big the
+/// ground is, so a bigger maze needs a bigger place, not tighter walls. At 7 the
+/// grid comes out around thirteen cells across instead of four: a maze of about a
+/// hundred and forty rooms rather than twelve.
+const STAGE_RADIUS: f32 = 5.3;
+
+/// How far apart the districts sit.
+///
+/// Comfortably more than two radii, so one district's outer wall can never reach
+/// into the next one's ground.
+pub const DISTRICT_GAP: f32 = 13.0;
+
+/// The edge of the world, past which a character is not allowed to be.
+///
+/// The districts reach `DISTRICT_GAP` plus a radius from the middle, so this has to
+/// clear that. It used to be 9.2 for districts 6 apart.
+pub const WORLD_LIMIT: f32 = 22.0;
 
 pub const CANDIDATES: [i32; 6] = [
     action::DANCE,
@@ -1624,80 +1668,93 @@ pub const EMOTION_NAMES: [&str; 26] = [
 ];
 
 pub const ACTS: [Act; 5] = [
+    // Where a fly wakes up. Bare ground, one tree, and nothing else to do but
+    // get up.
     Act {
-        id: "main_stage",
-        name: "Главная арена",
-        subtitle: "Прожекторы, аплодисменты, купол",
-        lesson: "Яркий свет вызывает танец",
+        id: "hill",
+        name: "Холм",
+        subtitle: "Дерево, склон, тишина",
+        lesson: "Первый шаг стоит дороже всех остальных",
         origin: [0.0, 0.0],
-        color: "#ff5c7a",
+        color: "#8ce06a",
         cue: cue::LIGHT,
-        solution: action::DANCE,
+        solution: action::FORWARD,
         distractor: action::REST,
-        ambience: action::FLAP,
+        ambience: action::REST,
         stage_radius: STAGE_RADIUS,
         stage_height: STAGE_HEIGHT,
-        colliders: &CORNER_POSTS,
+        colliders: &HILL_SOLIDS,
+        maze_cells: 0,
     },
+    // A village: the same maze as before, but a big one, between houses.
     Act {
-        id: "labyrinth",
-        name: "Лабиринт",
-        subtitle: "Стены, повороты, ориентиры",
-        lesson: "Вибрация пола ведёт к цели",
-        origin: [6.4, 0.0],
+        id: "village",
+        name: "Деревня",
+        subtitle: "Дома, тропы, заборы",
+        lesson: "Запах еды ведёт через избы",
+        origin: [DISTRICT_GAP, 0.0],
+        color: "#ffb86b",
+        cue: cue::ODOR_FRUIT,
+        solution: action::EAT,
+        distractor: action::DANCE,
+        ambience: action::FORWARD,
+        stage_radius: STAGE_RADIUS,
+        stage_height: STAGE_HEIGHT,
+        colliders: &OPEN_SOLIDS,
+        maze_cells: 11,
+    },
+    // The city, and the biggest maze of all. A fly that can find her way out of
+    // this has learnt something.
+    Act {
+        id: "city",
+        name: "Город",
+        subtitle: "Башни, улицы, фонари",
+        lesson: "В городе запах тонет в шуме",
+        origin: [0.0, DISTRICT_GAP + 2.0],
         color: "#54d7e8",
-        cue: cue::VIBRATION,
+        cue: cue::SOUND,
         solution: action::TURN_R,
         distractor: action::TURN_L,
         ambience: action::FORWARD,
         stage_radius: STAGE_RADIUS,
         stage_height: STAGE_HEIGHT,
-        colliders: &LABYRINTH_SOLIDS,
+        colliders: &OPEN_SOLIDS,
+        maze_cells: 12,
     },
+    // Dark. The lesson is standing still, which is the one thing a character that
+    // has just learnt to walk everywhere is worst at.
     Act {
-        id: "garden",
-        name: "Чародейный сад",
-        subtitle: "Цветы, фруктовый аромат, тепло",
-        lesson: "Запах фрукта ведёт к еде",
-        origin: [0.0, 6.0],
-        color: "#8ce06a",
-        cue: cue::ODOR_FRUIT,
-        solution: action::EAT,
+        id: "forest",
+        name: "Лес",
+        subtitle: "Смола, тень, чужой запах",
+        lesson: "В темноте нужно замереть",
+        origin: [-DISTRICT_GAP, 0.0],
+        color: "#a98bff",
+        cue: cue::DARK,
+        solution: action::REST,
         distractor: action::DANCE,
-        ambience: action::FLAP,
+        ambience: action::REST,
         stage_radius: STAGE_RADIUS,
         stage_height: STAGE_HEIGHT,
-        colliders: &GARDEN_SOLIDS,
+        colliders: &OPEN_SOLIDS,
+        maze_cells: 10,
     },
+    // Open ground with nothing to hide behind.
     Act {
-        id: "factory",
-        name: "Фабрика чудес",
-        subtitle: "Шестерни, металл, громкий стук",
-        lesson: "Стук требует точного движения",
-        origin: [-6.4, 0.0],
-        color: "#ffb86b",
-        cue: cue::SOUND,
+        id: "ruins",
+        name: "Руины",
+        subtitle: "Обломки, ветер, длинный свет",
+        lesson: "На открытом месте идти прямо",
+        origin: [0.0, -(DISTRICT_GAP + 2.0)],
+        color: "#ff5c7a",
+        cue: cue::VIBRATION,
         solution: action::FORWARD,
         distractor: action::REST,
         ambience: action::FLAP,
         stage_radius: STAGE_RADIUS,
         stage_height: STAGE_HEIGHT,
-        colliders: &CORNER_POSTS,
-    },
-    Act {
-        id: "void",
-        name: "Пустота",
-        subtitle: "Ни света, ни звука, ни края",
-        lesson: "В темноте нужно замереть",
-        origin: [0.0, -6.0],
-        color: "#a98bff",
-        cue: cue::DARK,
-        solution: action::REST,
-        distractor: action::TURN_L,
-        ambience: action::REST,
-        stage_radius: STAGE_RADIUS,
-        stage_height: STAGE_HEIGHT,
-        colliders: &CORNER_POSTS,
+        colliders: &OPEN_SOLIDS,
+        maze_cells: 12,
     },
 ];
 
@@ -2897,10 +2954,16 @@ impl EditorRuntime {
     fn build_courses(&mut self, seed: u32) {
         self.courses = (0..ACTS.len())
             .map(|index| {
+                let act = &ACTS[index];
+                if act.maze_cells == 0 {
+                    // Open ground, such as the hill a fly wakes up on. There is
+                    // nothing here to be lost in, and that is the point of it.
+                    return Course::open(act.stage_radius);
+                }
                 Course::build(
                     seed.wrapping_add(0x9E37_79B9u32.wrapping_mul(index as u32 + 1)),
-                    COURSE_CELLS,
-                    ACTS[index].stage_radius,
+                    act.maze_cells,
+                    act.stage_radius,
                 )
             })
             .collect();
@@ -2938,6 +3001,8 @@ impl EditorRuntime {
             self.agents[index].position[2] = 0.0;
             self.agents[index].velocity = [0.0, 0.0, 0.0];
             self.agents[index].fed = false;
+            self.agents[index].ate_feed = usize::MAX;
+            self.agents[index].ate_count = 0;
             self.agents[index].trail.clear();
             // The new maze is a new place. What she worked out about the last one
             // is worth exactly nothing here, and keeping it would be the worst
@@ -2964,23 +3029,59 @@ impl EditorRuntime {
             return false;
         }
         let [ax, ay] = ACTS[act_index].origin;
-        let dx = self.agents[index].position[0] - (ax + course.goal[0]);
-        let dy = self.agents[index].position[1] - (ay + course.goal[1]);
+        // The nearest food she has not had yet. Foods are laid out nearest-first,
+        // so this is the first one deeper than the deepest she has, and the round
+        // is over for her when there is no deeper one left.
+        let held = if self.agents[index].ate_feed == usize::MAX {
+            0
+        } else {
+            self.agents[index].ate_feed + 1
+        };
+        let Some(feed) = course.feeds.get(held) else {
+            return false;
+        };
+        let dx = self.agents[index].position[0] - (ax + feed[0]);
+        let dy = self.agents[index].position[1] - (ay + feed[1]);
         if dx.hypot(dy) > FOOD_REACH {
             return false;
         }
-        self.agents[index].fed = true;
+        let deeper =
+            self.agents[index].ate_feed == usize::MAX || held > self.agents[index].ate_feed;
+        if deeper {
+            self.agents[index].ate_feed = held;
+            self.agents[index].ate_count += 1;
+        }
         self.learning_updates = self.learning_updates.saturating_add(1);
+        let last = held + 1 >= course.feeds.len();
+        if last {
+            self.agents[index].fed = true;
+        }
         let id = self.agents[index].id;
         let act = ACTS[act_index].name;
+        let text = if course.feeds.len() <= 1 {
+            format!(
+                "дошла до еды на «{act}» за {} с",
+                (ROUND_LENGTH - self.round_time).max(0.0).round()
+            )
+        } else if last {
+            format!(
+                "съела всю еду на «{act}» ({}) за {} с",
+                course.feeds.len(),
+                (ROUND_LENGTH - self.round_time).max(0.0).round()
+            )
+        } else {
+            format!(
+                "еда {}/{} на «{act}», за {} с",
+                held + 1,
+                course.feeds.len(),
+                (ROUND_LENGTH - self.round_time).max(0.0).round()
+            )
+        };
         self.log(LogEntry {
             t: 0.0,
             fly: id,
             kind: "fed".to_owned(),
-            text: format!(
-                "дошла до еды на «{act}» за {} с",
-                (ROUND_LENGTH - self.round_time).max(0.0).round()
-            ),
+            text,
         });
         true
     }
@@ -3005,6 +3106,7 @@ impl EditorRuntime {
                 time_left,
                 round_length: ROUND_LENGTH,
                 food: [0.0, 0.0],
+                feeds: Vec::new(),
                 cell: 0.0,
                 start: [0.0, 0.0],
                 path_length: 0.0,
@@ -3031,6 +3133,9 @@ impl EditorRuntime {
                 RunnerSnapshot {
                     id: agent.id,
                     fed: agent.fed,
+                    ate_feed: agent.ate_feed,
+                    ate_count: agent.ate_count,
+                    feeds_total: course.feeds.len() as u32,
                     distance,
                     progress: (1.0 - distance / worst).clamp(-1.0, 1.0),
                     score: self.scores[index],
@@ -3047,7 +3152,8 @@ impl EditorRuntime {
             seed,
             time_left,
             round_length: ROUND_LENGTH,
-            food: course.goal,
+            food: course.feeds.first().copied().unwrap_or(course.goal),
+            feeds: course.feeds.clone(),
             cell: course.cell,
             start: course.start,
             path_length: course.path_length,
@@ -3107,7 +3213,10 @@ impl EditorRuntime {
             self.agents[index].position[1],
         ];
         let local = [me[0] - ax, me[1] - ay];
-        let food = course.goal;
+        // The nearest food, not the far one. The far one is the goal of a maze
+        // nobody finishes in a round, and walking towards it is walking away from
+        // the only thing that ends one.
+        let food = course.feeds.first().copied().unwrap_or(course.goal);
         let to_food = [food[0] - local[0], food[1] - local[1]];
         let food_distance = to_food[0].hypot(to_food[1]).max(1e-4);
         // Falls off with the square of the distance, so the pull is a gradient to
@@ -3178,6 +3287,7 @@ impl EditorRuntime {
             }
         }
         self.agents[index].nav_is_place = false;
+        self.agents[index].nav_walls = !course.open && !course.walls.is_empty();
         if lure_strength <= 0.0 {
             return [ax + local[0] + smell_dir[0], ay + local[1] + smell_dir[1]];
         }
@@ -4359,10 +4469,10 @@ mod tests {
         // the act list uses.
         let mut runtime = EditorRuntime::new(1);
         runtime
-            .apply_command(br#"{"action":"act","name":"void"}"#)
+            .apply_command(br#"{"action":"act","name":"ruins"}"#)
             .expect("act");
         let brain = runtime.brain_snapshot().expect("a brain");
-        let act = ACTS.iter().find(|a| a.id == "void").expect("the act");
+        let act = ACTS.iter().find(|a| a.id == "ruins").expect("the act");
         assert_eq!(
             brain.learning,
             format!("{} → {}", cue_name(act.cue), action_name(act.solution))
@@ -4458,12 +4568,12 @@ mod tests {
         // avoiding.
         let mut runtime = EditorRuntime::new(1);
         runtime
-            .apply_command(br#"{"action":"act","name":"labyrinth"}"#)
+            .apply_command(br#"{"action":"act","name":"village"}"#)
             .expect("act");
         let stage = ACTS
             .iter()
-            .find(|a| a.id == "labyrinth")
-            .expect("the labyrinth act exists");
+            .find(|a| a.id == "village")
+            .expect("the village district exists");
         assert!(
             stage.stage_height > 0.0,
             "a stage has to be raised or there is nothing to stand on"
@@ -4535,12 +4645,12 @@ mod tests {
         // against it would pass without her ever meeting it.
         let mut runtime = EditorRuntime::new(1);
         runtime
-            .apply_command(br#"{"action":"act","name":"labyrinth"}"#)
+            .apply_command(br#"{"action":"act","name":"village"}"#)
             .expect("act");
         let stage = ACTS
             .iter()
-            .find(|a| a.id == "labyrinth")
-            .expect("the labyrinth act exists");
+            .find(|a| a.id == "village")
+            .expect("the village district exists");
         let wall = runtime.course_solids[1]
             .iter()
             .copied()
@@ -4578,7 +4688,7 @@ mod tests {
         // the only thing that can say how fast she is really going.
         let mut runtime = EditorRuntime::new(1);
         runtime
-            .apply_command(br#"{"action":"act","name":"main_stage"}"#)
+            .apply_command(br#"{"action":"act","name":"hill"}"#)
             .expect("act");
         for _ in 0..120 {
             runtime.step(FIXED_DT);
@@ -4627,40 +4737,73 @@ mod tests {
     /// How many seconds of simulation a character is given to find the food.
     const COURSE_BUDGET: f32 = 240.0;
 
-    /// Walk a fresh runtime until somebody eats, and say how long it took.
-    ///
-    /// The whole feature is "the flies do something", so this is the measurement
-    /// that matters: a course nobody can solve is a hedge, and a course solved in
-    /// a second is a straight line.
-    fn time_until_someone_eats(fly_count: usize) -> Option<f32> {
-        let mut runtime = EditorRuntime::new(fly_count);
-        let mut elapsed = 0.0f32;
-        while elapsed < COURSE_BUDGET {
-            runtime.step(FIXED_DT);
-            elapsed += FIXED_DT;
-            if runtime.snapshot(60.0).shown_course().fed > 0 {
-                return Some(elapsed);
-            }
-        }
-        None
-    }
-
     #[test]
-    fn somebody_finds_the_food_and_the_food_is_on_the_course() {
+    fn somebody_finds_food_in_a_maze_the_size_of_a_village() {
         // The point of the whole thing. A maze nobody can solve is a hedge, and a
         // score that only goes up when a character happens to walk over a drifting
         // target point is what this replaced.
-        let Some(seconds) = time_until_someone_eats(3) else {
-            panic!("nobody found the food in {COURSE_BUDGET} s of simulation");
-        };
+        //
+        // Pointed at a maze district. The hill, which is where a fly wakes up, is
+        // open ground and there is nothing to search there.
+        //
+        // It asks whether she gets *some* food, not whether she finishes. In a
+        // maze of about a hundred rooms she does not finish in a round, and
+        // measuring it showed she does not finish in five minutes either. What she
+        // does is get a long way in, and how far is the score the panel shows.
+        let mut runtime = EditorRuntime::new(3);
+        runtime
+            .apply_command(br#"{"action":"act","name":"village"}"#)
+            .expect("act");
+        let course = runtime.snapshot(60.0).shown_course().clone();
         assert!(
-            seconds > 0.5,
-            "the food was reached in {seconds:.2} s, which is not a search"
+            course.feeds.len() >= 3,
+            "a village this size has one prize?"
         );
-        let course = EditorRuntime::new(3).snapshot(60.0).shown_course().clone();
-        assert!(!course.walls.is_empty(), "the course drew no walls");
-        assert!(course.path_length > 0.0, "the course has no route");
-        assert!(course.count > 0, "nobody is on the course");
+        assert!(
+            course.cell * 11.0 > 7.0,
+            "the village maze came out only {:.1} across",
+            course.cell * 11.0
+        );
+        let mut elapsed = 0.0f32;
+        let mut best = 0u32;
+        while elapsed < COURSE_BUDGET {
+            runtime.step(FIXED_DT);
+            elapsed += FIXED_DT;
+            let state = runtime.snapshot(60.0);
+            for runner in state.shown_course().runners.iter() {
+                best = best.max(runner.ate_count);
+            }
+            if best > 0 {
+                break;
+            }
+        }
+        assert!(
+            best > 0,
+            "nobody found so much as one mouthful in {COURSE_BUDGET} s"
+        );
+    }
+
+    #[test]
+    fn the_hill_is_open_ground_and_the_food_is_still_reached() {
+        // The hill is where a fly wakes up: a tree and open ground, and no maze.
+        // A newborn has to be able to walk to the food without a single wall to
+        // guide her, which is the first thing she has to learn and the one thing a
+        // maze cannot teach.
+        let runtime = EditorRuntime::new(1);
+        let course = runtime.snapshot(60.0).shown_course().clone();
+        assert!(
+            course.walls.is_empty(),
+            "the hill grew a maze, which is the one thing it must not have"
+        );
+        let mut runtime = runtime;
+        let mut elapsed = 0.0f32;
+        let mut fed = false;
+        while elapsed < COURSE_BUDGET && !fed {
+            runtime.step(FIXED_DT);
+            elapsed += FIXED_DT;
+            fed = runtime.snapshot(60.0).shown_course().fed > 0;
+        }
+        assert!(fed, "she never walked to the food across open ground");
     }
 
     #[test]
@@ -4685,28 +4828,51 @@ mod tests {
     }
 
     #[test]
-    fn every_act_has_a_course_of_its_own() {
-        // All five stages are on screen at once, so all five need a maze. A maze
-        // on one and bare floor on the other four reads as a bug, not as a choice.
-        // And they must differ: a troupe spread across the circus that is all
-        // solving the same puzzle is not spread across anything.
+    fn the_maze_districts_have_a_maze_each_and_the_hill_does_not() {
+        // The hill is where a fly wakes up, and the one thing she is not on the
+        // morning she wakes is lost. So the hill is open ground with a tree, and
+        // every other district is a maze.
+        //
+        // All five are on screen at once, so a maze on one and bare floor on the
+        // others would read as a bug. The test states which is which rather than
+        // pretending they are the same.
         let state = EditorRuntime::new(3).snapshot(60.0);
         assert_eq!(state.courses.len(), ACTS.len());
+        let mut mazes: Vec<Vec<WallSnapshot>> = Vec::new();
         for (index, course) in state.courses.iter().enumerate() {
-            assert_eq!(course.act, index, "a course is filed under the wrong act");
+            let act = &ACTS[index];
+            assert_eq!(
+                course.act, index,
+                "a course is filed under the wrong district"
+            );
+            assert_eq!(
+                course.walls.is_empty(),
+                act.maze_cells == 0,
+                "district {index} ({}) does not match its own maze size",
+                act.id
+            );
+            if act.maze_cells == 0 {
+                continue;
+            }
             assert!(
                 !course.walls.is_empty(),
-                "act {index} has no maze, so there is nothing to do there"
+                "district {index} has nothing to search"
             );
-            assert!(course.path_length > 0.0, "act {index} has no route");
+            assert!(course.path_length > 0.0, "district {index} has no route");
+            assert!(
+                course.cell * act.maze_cells as f32 > 6.0,
+                "district {index} wants a {}-cell maze but came out {:.1} across",
+                act.maze_cells,
+                course.cell * act.maze_cells as f32
+            );
+            mazes.push(course.walls.clone());
         }
-        let first = &state.courses[0].walls;
-        let all_differ = state
-            .courses
-            .iter()
-            .skip(1)
-            .all(|course| &course.walls != first);
-        assert!(all_differ, "two acts were handed the same maze");
+        assert!(mazes.len() >= 3, "the world has fewer mazes than it should");
+        for (i, first) in mazes.iter().enumerate() {
+            for other in &mazes[i + 1..] {
+                assert_ne!(first, other, "two districts were handed the same maze");
+            }
+        }
     }
 
     #[test]
@@ -4715,12 +4881,15 @@ mod tests {
         // back, a character could learn it once and never look again, and the
         // thing on screen would be a rehearsal.
         let mut runtime = EditorRuntime::new(1);
+        runtime
+            .apply_command(br#"{"action":"act","name":"village"}"#)
+            .expect("act");
         let first = runtime.snapshot(60.0).shown_course().clone();
         runtime
             .apply_command(br#"{"action":"course","value":987654}"#)
             .expect("course");
         let second = runtime.snapshot(60.0).shown_course().clone();
-        assert_ne!(first.walls.len(), 0);
+        assert_ne!(first.walls.len(), 0, "the village has no maze to rebuild");
         assert_ne!(
             first.walls, second.walls,
             "a new seed produced the same maze"

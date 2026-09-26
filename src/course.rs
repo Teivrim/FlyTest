@@ -51,14 +51,24 @@ pub struct Course {
     pub walls: Vec<Wall>,
     /// Where a character is set down, stage-local.
     pub start: [f32; 2],
-    /// Where the food is, stage-local.
+    /// The food, stage-local: the one this round is played for.
     pub goal: [f32; 2],
+    /// Every food source in the maze, nearest the entrance first.
+    ///
+    /// One at the far end of a hundred rooms is not a round, it is a march: nothing
+    /// arrives in any time a circus can sit through, which is exactly what
+    /// measuring it showed. So a big maze holds several, and a character only has
+    /// to reach the first she comes to. How deep into the maze she got is then
+    /// something you can see, and getting deeper is something to watch.
+    pub feeds: Vec<[f32; 2]>,
     /// Cell centres from start to food. For scoring only.
     pub solution: Vec<[f32; 2]>,
     /// Length of `solution` in stage-local units, zero when unreachable.
     pub path_length: f32,
     /// The start and the food are the same cell, so there is nothing to do.
     pub degenerate: bool,
+    /// No maze here: open ground. Deliberately so, not a failed build.
+    pub open: bool,
     /// Where every cell is.
     pub centres: Vec<[f32; 2]>,
     /// Which cells can be walked between, and in which directions.
@@ -109,7 +119,7 @@ const PASSAGE_ROOM: f32 = 3.4;
 const RIM_MARGIN: f32 = 0.05;
 
 /// The largest grid tried before giving up on fitting one inside the stage.
-const MAX_CELLS: usize = 9;
+const MAX_CELLS: usize = 16;
 
 /// A small deterministic generator, local to this module.
 ///
@@ -229,6 +239,7 @@ impl Course {
             let (start_point, goal_point) = (grid.centres[start], grid.centres[goal]);
             let walls = grid.walls();
             let passages = grid.passages();
+            let feeds = grid.feeds(start, goal, goal);
             let cell = grid.cell;
             let wall_thickness = cell * WALL_FRACTION;
             return Self {
@@ -242,8 +253,10 @@ impl Course {
                 solution,
                 path_length,
                 degenerate,
+                open: false,
                 centres: grid.centres,
                 passages,
+                feeds,
             };
         }
     }
@@ -260,8 +273,35 @@ impl Course {
             solution: Vec::new(),
             path_length: 0.0,
             degenerate: true,
+            open: false,
             centres: Vec::new(),
             passages: Vec::new(),
+            feeds: Vec::new(),
+        }
+    }
+
+    /// A district with no maze at all: open ground, and nowhere to get lost.
+    ///
+    /// Not the same as a maze that failed to build. This is deliberately how the
+    /// hill is made, because the one thing a fly is not, on the morning she wakes
+    /// up, is lost. There is a tree and there is open ground, and both of those are
+    /// things to learn.
+    pub fn open(radius: f32) -> Self {
+        Self {
+            seed: 0,
+            cells: 0,
+            cell: 0.0,
+            wall_thickness: 0.0,
+            walls: Vec::new(),
+            start: [-radius * 0.45, 0.0],
+            goal: [radius * 0.45, 0.0],
+            solution: Vec::new(),
+            path_length: radius * 0.9,
+            degenerate: true,
+            centres: Vec::new(),
+            passages: Vec::new(),
+            feeds: vec![[radius * 0.45, 0.0]],
+            open: true,
         }
     }
 
@@ -323,12 +363,21 @@ impl Grid {
     /// margin. Sizing it the other way round, from the stage, is what put the
     /// boundary outside the disc where the clipping deleted it.
     ///
-    /// `cells` is a wish and is recomputed from the geometry, because the answer
-    /// that comes out is usually not the one that was asked for.
-    fn new(_wish: usize, radius: f32) -> Self {
+    /// `cells` is how big a maze is wanted, and it is honoured.
+    ///
+    /// It used to be ignored and the count recomputed from the ground, which meant
+    /// every district got the same maze whatever was asked for and the only way to
+    /// change its size was to move the district. Two numbers for one thing, and the
+    /// one nobody edits was the one that counted.
+    ///
+    /// The wish is still capped: a cell has to stay wide enough for a character to
+    /// walk down, and the grid has to fit inside the disc. Asking for a maze finer
+    /// than the ground can hold gets the finest one that fits.
+    fn new(wish: usize, radius: f32) -> Self {
         let want = crate::editor::BODY_RADIUS * PASSAGE_ROOM / (1.0 - WALL_FRACTION);
         let span = radius * 2.0 - want * WALL_FRACTION - RIM_MARGIN * 2.0;
-        let cells = ((span / want).round() as usize).clamp(3, MAX_CELLS);
+        let fits = ((span / want).round() as usize).clamp(3, MAX_CELLS);
+        let cells = wish.clamp(3, fits);
         let cell = span / cells as f32;
         let half = cell * cells as f32 * 0.5;
         let mut grid = Grid {
@@ -561,6 +610,31 @@ impl Grid {
                 {
                     out_here.push(next);
                 }
+            }
+        }
+        out
+    }
+
+    /// Where the food goes, in order of how deep into the maze it is.
+    ///
+    /// Spread along the route from the entrance to the far end, so a character who
+    /// finds the first one has found a food and a round is over, and a character
+    /// who gets further finds a later one. The far end is always last and always
+    /// the goal, so a maze nobody can finish is still a maze somebody can be seen
+    /// to get lost in rather than to give up on.
+    fn feeds(&self, from: usize, to: usize, goal: usize) -> Vec<[f32; 2]> {
+        let route = self.solve(from, to);
+        if route.len() < 2 {
+            return self.centres.get(goal).copied().into_iter().collect();
+        }
+        // One food per stretch, and never fewer than one.
+        let wanted = (route.len() / 5).clamp(1, 5);
+        let stride = (route.len() - 1) / wanted;
+        let mut out = Vec::with_capacity(wanted);
+        for step in (1..=wanted).map(|i| (i * stride).min(route.len() - 1)) {
+            let point = route[step];
+            if !out.contains(&point) {
+                out.push(point);
             }
         }
         out

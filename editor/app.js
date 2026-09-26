@@ -14,7 +14,7 @@ let actStages = new Map();
 let spotlights = null;
 let cameraAzimuth = 0.72;
 let cameraElevation = 0.48;
-let cameraDistance = 17.5;
+let cameraDistance = 46;
 // The point the camera looks at. WASD walks this around the arena so each act
 // can be inspected up close, instead of only ever staring at the middle.
 const cameraTarget = { x: 0, y: 1.2, z: 0 };
@@ -39,7 +39,7 @@ function init3D() {
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
   scene = new THREE.Scene();
   scene.background = new THREE.Color('#070b13');
-  scene.fog = new THREE.Fog('#070b13', 12, 26);
+  scene.fog = new THREE.Fog('#070b13', 34, 78);
   camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
   raycaster = new THREE.Raycaster();
   updateCamera();
@@ -219,14 +219,24 @@ function buildActStage(act) {
   // outermost solids on the ring are the posts.
   const solids = (act.colliders || []).filter((c) => c.radius > 0);
   const ring = Math.max(...solids.map((c) => Math.hypot(c.x, c.z)), 1.5);
-  const posts = solids.filter((c) => Math.hypot(c.x, c.z) > ring - 0.3);
-  for (let i = 0; i < posts.length; i++) {
-    const c = posts[i];
+  const ring_posts = solids.filter((c) => Math.hypot(c.x, c.z) > ring - 0.3);
+  // What the animator gets is the bulbs and their phase, not the colliders.
+  //
+  // It used to be handed the collider list and then asked each one for its bulb,
+  // which is a thing a collider has never heard of. So the animator threw on its
+  // first frame, which meant `renderer.render` after it never ran and the
+  // `requestAnimationFrame` after that never fired: the scene drew one frame and
+  // stopped, and the console said nothing, because the throw was inside an
+  // animation callback and nothing was watching for it.
+  const posts = [];
+  for (let i = 0; i < ring_posts.length; i++) {
+    const c = ring_posts[i];
     const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 1.5, 8), material('#2a3a52'));
     post.position.set(c.x, stageHeight + 0.75, c.z);
     const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), new THREE.MeshBasicMaterial({ color: act.color }));
     bulb.position.set(c.x, stageHeight + 1.53, c.z);
     group.add(post); group.add(bulb);
+    posts.push({ bulb, phase: i * 1.3 });
   }
 
   // Act-specific scenery so the five stages are visually distinct. Each piece
@@ -457,7 +467,7 @@ function updateCameraFromKeys(now) {
   if (heldKeys.has('KeyQ')) cameraTarget.y -= speed * 1.4;
 
   // Keep the observer inside the tent, or the fog swallows the scene.
-  const limit = 9.0;
+  const limit = 24.0;
   cameraTarget.x = Math.max(-limit, Math.min(limit, cameraTarget.x));
   cameraTarget.z = Math.max(-limit, Math.min(limit, cameraTarget.z));
   cameraTarget.y = Math.max(0.2, Math.min(5.5, cameraTarget.y));
@@ -471,7 +481,7 @@ function focusAct(index) {
     cameraTarget.x = act.origin[0];
     cameraTarget.z = act.origin[1];
     cameraTarget.y = 1.6;
-    cameraDistance = Math.min(cameraDistance, 11);
+    cameraDistance = Math.min(cameraDistance, 30);
     updateCamera();
   }
   command('act', { name: (act ? act.id : ACT_ORDER[index]) });
@@ -1203,20 +1213,34 @@ function drawCourses() {
       scene.add(scenery);
       courseScenery.set(course.act, scenery);
 
-      // The food and a ring under it, so it reads from across the tent.
+      // Every food in the maze, and a ring under each so it reads from across
+      // the tent. The one she reaches disappears, which is the whole visible
+      // shape of a round: five lights going out one at a time, deepest last.
       let food = courseFood.get(course.act);
       if (food) { scene.remove(food); food.children.forEach((c) => { c.geometry?.dispose(); c.material?.dispose(); }); }
       food = new THREE.Group();
-      const crumb = new THREE.Mesh(new THREE.SphereGeometry(0.075, 14, 10), new THREE.MeshBasicMaterial({ color: '#ffd36b' }));
-      crumb.position.y = 0.1;
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.016, 6, 26), new THREE.MeshBasicMaterial({ color: '#ffd36b', transparent: true, opacity: 0.85 }));
-      ring.rotation.x = Math.PI / 2;
-      ring.position.y = 0.02;
-      food.add(crumb, ring);
-      food.userData.ring = ring;
+      const marks = (course.feeds || [course.food]).map((point, i) => {
+        const mark = new THREE.Group();
+        const crumb = new THREE.Mesh(
+          new THREE.SphereGeometry(i === 0 ? 0.10 : 0.075, 14, 10),
+          new THREE.MeshBasicMaterial({ color: '#ffd36b' })
+        );
+        crumb.position.y = 0.1 + i * 0.01;
+        const ring = new THREE.Mesh(
+          new THREE.TorusGeometry(0.17 + i * 0.03, 0.016, 6, 26),
+          new THREE.MeshBasicMaterial({ color: '#ffd36b', transparent: true, opacity: 0.85 })
+        );
+        ring.rotation.x = Math.PI / 2;
+        ring.position.y = 0.02;
+        mark.add(crumb, ring);
+        mark.position.set(ox + point[0], height, oz + point[1]);
+        mark.userData.ring = ring;
+        food.add(mark);
+        return mark;
+      });
+      food.userData.marks = marks;
       scene.add(food);
       courseFood.set(course.act, food);
-
 
       for (const [id, line] of courseTrails) {
         if (line.userData.act !== course.act) continue;
@@ -1227,14 +1251,17 @@ function drawCourses() {
       }
     }
 
-    const eaten = course.count > 0 && course.fed >= course.count;
     const food = courseFood.get(course.act);
     if (food) {
-      food.visible = !eaten;
-      if (!eaten) {
-        food.position.set(ox + course.food[0], height, oz + course.food[1]);
-        food.scale.setScalar(1 + Math.sin(performance.now() * 0.005 + course.act) * 0.16);
-      }
+      const marks = food.userData.marks || [];
+      const pulse = 1 + Math.sin(performance.now() * 0.005 + course.act) * 0.16;
+      marks.forEach((mark, i) => {
+        // A character who has eaten this one puts it out, and it stays out.
+        const had = course.runners.some((runner) => runner.fed && runner.ate_feed >= i);
+        mark.visible = !had;
+        if (!had) mark.scale.setScalar(pulse + i * 0.02);
+      });
+      food.visible = marks.length > 0;
     }
 
     // One line per character, in that character's colour, so the first one
@@ -1314,10 +1341,14 @@ function renderPanels() {
   $('drive').textContent = `${intentLabel(agent.drive)} · ${agent.drive}`; $('decision').textContent = intentLabel(agent.decision); $('attention').textContent = agent.attention; $('confidence').textContent = `confidence ${Math.round(agent.confidence * 100)}%`;
   const course = (data.courses || [])[data.training.current_act] || {};
   $('course-round').textContent = `раунд ${course.round || 0}`;
-  $('course-goal').textContent = course.count
-    ? `дошли до еды: ${course.fed} из ${course.count}`
-    : 'дойти до еды в конце лабиринта';
-  $('course-count').textContent = `${course.fed || 0} / ${course.count || 0}`;
+  // How deep she got, not whether she arrived. A maze of a hundred rooms is not
+  // finished in a round, so the number worth showing is how much of it she ate.
+  const best = (course.runners || []).reduce((a, r) => Math.max(a, r.ate_count || 0), 0);
+  const total = (course.runners || [])[0]?.feeds_total || 0;
+  $('course-goal').textContent = total > 1
+    ? `съедена еда: ${best} из ${total}`
+    : 'дойти до еды';
+  $('course-count').textContent = `${best} / ${total}`;
   $('course-time').value = Math.max(0, Math.min(1, (course.time_left || 0) / (course.round_length || 1)));
   $('course-seed').textContent = `лабиринт seed ${course.seed || 0} · длина хода ${(course.path_length || 0).toFixed(1)}`;
   $('strategy-value').textContent = agent.strategy; $('reward-value').textContent = `${Math.round(agent.reward * 100)}%`; $('novelty-value').textContent = `${Math.round(agent.novelty * 100)}%`; $('puff-value').textContent = `${agent.puff_count} (${data.metrics.total_puff_events})`; $('learning-value').textContent = String(data.metrics.learning_updates);
