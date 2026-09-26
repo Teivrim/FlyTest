@@ -28,7 +28,7 @@ function escapeHtml(value) { return String(value).replace(/[&<>'"]/g, (char) => 
 
 function init3D() {
   if (!window.THREE) {
-    $('status-text').textContent = 'WebGL/Three.js Р Р…Р ВµР Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р ВµР Р…';
+    $('status-text').textContent = 'WebGL/Three.js недоступен';
     return false;
   }
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
@@ -334,11 +334,11 @@ function buildArena() {
 
   // Stage scenery for all five acts, whether or not data has arrived yet.
   const fallback = [
-    { id: 'main_stage', name: 'Р вЂњР В»Р В°Р Р†Р Р…Р В°РЎРЏ Р В°РЎР‚Р ВµР Р…Р В°', color: '#ff5c7a', origin: [0, 0] },
-    { id: 'labyrinth', name: 'Р вЂєР В°Р В±Р С‘РЎР‚Р С‘Р Р…РЎвЂљ', color: '#54d7e8', origin: [6.4, 0] },
-    { id: 'garden', name: 'Р В§Р В°РЎР‚Р С•Р Т‘Р ВµР в„–Р Р…РЎвЂ№Р в„– РЎРѓР В°Р Т‘', color: '#8ce06a', origin: [0, 6] },
-    { id: 'factory', name: 'Р В¤Р В°Р В±РЎР‚Р С‘Р С”Р В° РЎвЂЎРЎС“Р Т‘Р ВµРЎРѓ', color: '#ffb86b', origin: [-6.4, 0] },
-    { id: 'void', name: 'Р СџРЎС“РЎРѓРЎвЂљР С•РЎвЂљР В°', color: '#a98bff', origin: [0, -6] },
+    { id: 'main_stage', name: 'Главная арена', color: '#ff5c7a', origin: [0, 0] },
+    { id: 'labyrinth', name: 'Лабиринт', color: '#54d7e8', origin: [6.4, 0] },
+    { id: 'garden', name: 'Чародейный сад', color: '#8ce06a', origin: [0, 6] },
+    { id: 'factory', name: 'Фабрика чудес', color: '#ffb86b', origin: [-6.4, 0] },
+    { id: 'void', name: 'Пустота', color: '#a98bff', origin: [0, -6] },
   ];
   for (const act of fallback) if (!actStages.has(act.id)) buildActStage(act);
   if (state.data) syncActStages();
@@ -1144,17 +1144,17 @@ async function command(action, payload = {}) { await fetch('/api/command', { met
 async function refresh() {
   try {
     const response = await fetch('/api/state', { cache: 'no-store' }); if (!response.ok) throw new Error('state unavailable'); state.data = await response.json(); state.selected = state.data.selected_fly || (state.data.agents[0] && state.data.agents[0].id);
-    $('connection').className = 'pill online'; $('connection').textContent = 'РІвЂ”РЏ live'; $('status-text').textContent = state.data.running ? 'Runtime РЎР‚Р В°Р В±Р С•РЎвЂљР В°Р ВµРЎвЂљ' : 'Runtime Р Р…Р В° Р С—Р В°РЎС“Р В·Р Вµ';
+    $('connection').className = 'pill online'; $('connection').textContent = '● live'; $('status-text').textContent = state.data.running ? 'Runtime работает' : 'Runtime на паузе';
     syncActStages();
     if (state.data.tick - state.lastUiTick >= 3 || state.lastUiTick < 0) { renderPanels(); state.lastUiTick = state.data.tick; }
-  } catch (error) { $('connection').className = 'pill offline'; $('connection').textContent = 'РІвЂ”РЏ offline'; $('status-text').textContent = 'Runtime Р Р…Р ВµР Т‘Р С•РЎРѓРЎвЂљРЎС“Р С—Р ВµР Р…'; }
+  } catch (error) { $('connection').className = 'pill offline'; $('connection').textContent = '● offline'; $('status-text').textContent = 'Runtime недоступен'; }
 }
-const INTENT_LABELS = { explore: 'Р С‘РЎРѓРЎРѓР В»Р ВµР Т‘Р С•Р Р†Р В°Р Р…Р С‘Р Вµ', approach_odor: 'РЎРѓР В»Р ВµР Т‘Р С•Р Р†Р В°РЎвЂљРЎРЉ Р В·Р В° Р В·Р В°Р С—Р В°РЎвЂ¦Р С•Р С', seek_light: 'Р С—Р С•Р С‘РЎРѓР С” РЎРѓР Р†Р ВµРЎвЂљР В°', avoid_contact: 'Р С‘Р В·Р В±Р ВµР С–Р В°Р Р…Р С‘Р Вµ Р С”Р С•Р Р…РЎвЂљР В°Р С”РЎвЂљР В°', steer_toward_odor: 'Р С—Р С•Р Р†Р С•РЎР‚Р С•РЎвЂљ Р С” Р В·Р В°Р С—Р В°РЎвЂ¦РЎС“', break_contact: 'РЎР‚Р В°Р В·РЎР‚РЎвЂ№Р Р† Р С”Р С•Р Р…РЎвЂљР В°Р С”РЎвЂљР В°', climb: 'Р Р…Р В°Р В±Р С•РЎР‚ Р Р†РЎвЂ№РЎРѓР С•РЎвЂљРЎвЂ№', maintain_course: 'РЎС“Р Т‘Р ВµРЎР‚Р В¶Р В°Р Р…Р С‘Р Вµ Р С”РЎС“РЎР‚РЎРѓР В°' };
+const INTENT_LABELS = { explore: 'разведка вокруг', approach_odor: 'подойти к источнику запаха', seek_light: 'идти к источнику света', avoid_contact: 'избегать опасного сближения', steer_toward_odor: 'вести к источнику запаха', break_contact: 'прервать контакт и уйти', climb: 'набрать высоту', maintain_course: 'удерживать курс' };
 function intentLabel(value) { return INTENT_LABELS[value] || value; }
 function renderPanels() {
   const data = state.data; if (!data) return;
-  $('fps').textContent = `${Math.round(data.metrics.fps)} FPS`; $('tick').textContent = `tick ${data.tick}`; $('sim-time').textContent = `t = ${data.metrics.sim_time.toFixed(2)} s`; $('model-label').textContent = 'model: lightweight-policy'; $('pause').textContent = data.running ? 'Р СџР В°РЎС“Р В·Р В°' : 'Р СџРЎР‚Р С•Р Т‘Р С•Р В»Р В¶Р С‘РЎвЂљРЎРЉ';
-  $('fly-list').innerHTML = data.agents.map((agent) => `<div class="fly-card ${agent.id === state.selected ? 'selected' : ''}" data-id="${agent.id}"><div class="fly-avatar">${agent.id}</div><div><strong>${escapeHtml(agent.name)}</strong><small>${agent.channel} Р’В· ${agent.neurotransmitter}</small></div><button class="remove" data-remove="${agent.id}" title="Р Р€Р Т‘Р В°Р В»Р С‘РЎвЂљРЎРЉ">Р“вЂ”</button></div>`).join('');
+  $('fps').textContent = `${Math.round(data.metrics.fps)} FPS`; $('tick').textContent = `tick ${data.tick}`; $('sim-time').textContent = `t = ${data.metrics.sim_time.toFixed(2)} s`; $('model-label').textContent = 'model: lightweight-policy'; $('pause').textContent = data.running ? 'Пауза' : 'Продолжить';
+  $('fly-list').innerHTML = data.agents.map((agent) => `<div class="fly-card" data-id="${agent.id}"><div class="fly-avatar">${agent.id}</div><div><strong>${escapeHtml(agent.name)}</strong><small>${agent.channel} · ${agent.neurotransmitter}</small></div><button class="remove" data-remove="${agent.id}" title="удалить персонажа">✕</button></div>`).join('');
   document.querySelectorAll('.fly-card').forEach((card) => card.addEventListener('click', (event) => { if (event.target.dataset.remove) return; state.selected = Number(card.dataset.id); command('select', { id: state.selected }); }));
   document.querySelectorAll('[data-remove]').forEach((button) => button.addEventListener('click', (event) => { event.stopPropagation(); command('remove', { id: Number(button.dataset.remove) }); }));
   const agent = data.agents.find((item) => item.id === state.selected) || data.agents[0]; if (!agent) return;
@@ -1195,15 +1195,15 @@ function renderActs(data) {
 function renderBrain(data) {
   const brain = data.brain;
   const training = data.training || {};
-  $('training-toggle').textContent = training.enabled ? 'Р С’Р Р†РЎвЂљР С•: Р вЂ™Р С™Р вЂє' : 'Р С’Р Р†РЎвЂљР С•: Р вЂ™Р В«Р С™Р вЂє';
+  $('training-toggle').textContent = training.enabled ? 'Авто: ВКЛ' : 'Авто: ВЫКЛ';
   if ($('epsilon') !== document.activeElement) $('epsilon').value = String(training.epsilon ?? 0.25);
   if (!brain) {
-    $('brain-thought').textContent = 'Р СРЎС“РЎвЂ¦Р В° Р Р…Р Вµ Р Р†РЎвЂ№Р В±РЎР‚Р В°Р Р…Р В°';
+    $('brain-thought').textContent = 'муха не выбрана';
     return;
   }
   const pct = (v) => `${Math.round(Math.max(0, Math.min(1, v)) * 100)}%`;
   $('brain-thought').textContent = brain.thought;
-  $('brain-level').textContent = `РЎС“РЎР‚. ${brain.level}`;
+  $('brain-level').textContent = `ур. ${brain.level}`;
   $('brain-mastery').textContent = pct(brain.mastery);
   $('brain-mastery-meter').style.width = pct(brain.mastery);
   $('brain-weight').textContent = pct(brain.weight);
@@ -1321,8 +1321,8 @@ function posePosture(pose, posture) {
 
 // Gesture ids, matching T_GES_* in TFLY.h.
 const GESTURE_IDS = {
-  'Р С—РЎР‚Р С‘Р Р†Р ВµРЎвЂљРЎРѓРЎвЂљР Р†Р С‘Р Вµ': 1, 'Р С—Р С•Р С”Р В»Р С•Р Р…': 2, 'РЎвЂ¦Р В»Р С•Р С—Р С”Р С‘': 3, 'РЎС“Р С”Р В°Р В·Р В°Р Р…Р С‘Р Вµ': 4,
-  'РЎС“РЎвЂљР ВµРЎв‚¬Р ВµР Р…Р С‘Р Вµ': 5, 'Р С—Р В»Р ВµРЎвЂЎР С‘Р С”Р С‘': 6, 'Р С—РЎР‚Р С•РЎв‚¬РЎС“ Р С•Р В±Р Р…РЎРЏРЎвЂљРЎРЉ': 7, 'Р С—Р С•Р С”Р С•Р в„–': 0,
+  'приветствие': 1, 'поклон': 2, 'хлопки': 3, 'указание': 4,
+  'утешение': 5, 'плечики': 6, 'прошу обнять': 7, 'покой': 0,
 };
 
 /*
@@ -1512,9 +1512,9 @@ function footDrop(hipAngle, kneeAngle, ankleAngle) {
 function renderGaitAndAffect(agent) {
   const gait = agent.gait || {};
   const pct = (v) => `${Math.round(Math.max(0, Math.min(1, v || 0)) * 100)}%`;
-  $('gait-preset').textContent = gait.preset || 'РІР‚вЂќ';
-  $('gait-steps').textContent = `${gait.steps || 0} РЎв‚¬Р В°Р С–Р С•Р Р†`;
-  $('gait-balance').textContent = `РЎС“РЎРѓРЎвЂљР С•Р в„–РЎвЂЎР С‘Р Р†Р С•РЎРѓРЎвЂљРЎРЉ ${pct(gait.balance)}`;
+  $('gait-preset').textContent = gait.preset || '—';
+  $('gait-steps').textContent = `${gait.steps || 0} шагов`;
+  $('gait-balance').textContent = `устойчивость ${pct(gait.balance)}`;
   $('gait-stride').style.width = pct(gait.stride);
   $('gait-cadence').style.width = pct(gait.cadence);
   $('gait-sway').style.width = pct(gait.sway);
@@ -1528,7 +1528,7 @@ function renderGaitAndAffect(agent) {
 
   // Every emotion, not just the strongest, so a character reads as a mix.
   const affect = agent.affect || [];
-  $('affect-count').textContent = `${affect.filter((e) => e.value > 0.01).length} Р В°Р С”РЎвЂљР С‘Р Р†Р Р…РЎвЂ№РЎвЂ¦`;
+  $('affect-count').textContent = `${affect.filter((e) => e.value > 0.01).length} активных`;
   $('affect-list').innerHTML = affect.map((e) =>
     `<span class="affect-row">${escapeHtml(e.name)}<i style="width:${pct(e.value)}"></i><b>${Math.round(e.value * 100)}</b></span>`
   ).join('');
@@ -1536,7 +1536,7 @@ function renderGaitAndAffect(agent) {
   // Face gauges, straight from the model.
   const face = agent.face || {};
   const blinkValue = face.blink ?? 0;
-  $('face-blink').textContent = blinkValue > 0.7 ? 'Р С–Р В»Р В°Р В·Р В° Р В·Р В°Р С”РЎР‚РЎвЂ№РЎвЂљРЎвЂ№' : (blinkValue > 0.2 ? 'Р СР С•РЎР‚Р С–Р В°Р ВµРЎвЂљ' : 'Р С–Р В»Р В°Р В·Р В° Р С•РЎвЂљР С”РЎР‚РЎвЂ№РЎвЂљРЎвЂ№');
+  $('face-blink').textContent = blinkValue > 0.7 ? 'глаза закрыты' : (blinkValue > 0.2 ? 'моргает' : 'глаза открыты');
   $('face-blink-meter').style.width = pct(blinkValue);
   $('face-pupil-meter').style.width = pct(((face.pupil ?? 1) - 0.5) / 1.1);
   // Brow and mouth run -1..1, so shift them into a 0..1 bar.
@@ -1547,10 +1547,10 @@ function renderGaitAndAffect(agent) {
 
   // Social.
   const social = agent.social || {};
-  $('social-gesture').textContent = social.gesture || 'Р С—Р С•Р С”Р С•Р в„–';
-  $('social-partner').textContent = social.partner ? `РЎРѓ #${social.partner}` : 'Р С•Р Т‘Р С‘Р Р…Р С•Р С”Р В°';
+  $('social-gesture').textContent = social.gesture || 'покой';
+  $('social-partner').textContent = social.partner ? `с #${social.partner}` : 'нет пары';
   $('social-bond-meter').style.width = pct(social.bond);
-  $('social-last').textContent = social.last_encounter || 'РІР‚вЂќ';
+  $('social-last').textContent = social.last_encounter || '—';
 
   // Posture. The spine and the lean are signed, so their meters grow out from
   // the centre; a plain left-anchored bar would read "curled in" and
@@ -1565,11 +1565,11 @@ function renderGaitAndAffect(agent) {
   const eyeOpen = clampf(face.eye_open ?? 1, 0, 1);
   const woke = face.wake_timer ?? 99;
   $('face-eyes-state').textContent =
-    eyeOpen < 0.2 ? 'РЎРѓР С—Р С‘РЎвЂљ'
-      : woke < 1.4 ? `Р С—РЎР‚Р С•РЎРѓРЎвЂ№Р С—Р В°Р ВµРЎвЂљРЎРѓРЎРЏ ${(1.4 - woke).toFixed(1)}РЎРѓ`
-        : (face.blink ?? 0) > 0.7 ? 'Р СР С•РЎР‚Р С–Р В°Р ВµРЎвЂљ'
-          : eyeOpen < 0.98 ? 'Р С—РЎР‚Р С‘РЎвЂ°РЎС“РЎР‚Р ВµР Р…Р В°' : 'Р С•РЎвЂљР С”РЎР‚РЎвЂ№РЎвЂљРЎвЂ№';
-  $('sleep-toggle').textContent = eyeOpen < 0.2 ? 'Р В Р В°Р В·Р В±РЎС“Р Т‘Р С‘РЎвЂљРЎРЉ' : 'Р Р€РЎРѓРЎвЂ№Р С—Р С‘РЎвЂљРЎРЉ';
+    eyeOpen < 0.2 ? 'спит'
+        : woke < 1.4 ? `просыпается ${(1.4 - woke).toFixed(1)} с`
+        : (face.blink ?? 0) > 0.7 ? 'моргает'
+          : eyeOpen < 0.98 ? 'прищурена' : 'открыты';
+  $('sleep-toggle').textContent = eyeOpen < 0.2 ? 'Разбудить' : 'Усыпить';
   const gazeLock = (agent.social || {}).drive ?? 0;
   $('face-gaze-meter').style.width = pct(Math.abs(face.gaze_x ?? 0) * (0.3 + 0.7 * gazeLock));
 }
@@ -1596,7 +1596,7 @@ function drawCurve(points) {
   if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
   ctx.clearRect(0, 0, w, h);
 
-  $('curve-label').textContent = points.length ? `${points.length} Р С—РЎР‚Р С•Р В±` : 'Р Р…Р ВµРЎвЂљ Р Т‘Р В°Р Р…Р Р…РЎвЂ№РЎвЂ¦';
+  $('curve-label').textContent = points.length ? `${points.length} проб` : 'нет данных';
   if (points.length < 2) return;
 
   const pad = 3 * dpr;
@@ -1635,7 +1635,7 @@ function drawCurve(points) {
 
 // ---- event log --------------------------------------------------------
 function renderLog(entries, path) {
-  $('log-path').textContent = path ? 'jsonl' : 'Р С—Р В°Р СРЎРЏРЎвЂљРЎРЉ';
+  $('log-path').textContent = path ? 'jsonl' : 'память';
   const list = $('log-list');
   const html = entries.slice().reverse().slice(0, 40).map((e) => {
     const stamp = `${Math.floor(e.t / 60)}:${String(Math.floor(e.t % 60)).padStart(2, '0')}`;
@@ -1663,7 +1663,7 @@ function render3D() {
   renderer.render(scene, camera);
   requestAnimationFrame(render3D);
 }
-$('pause').addEventListener('click', () => command(state.data && state.data.running ? 'pause' : 'resume')); $('reset').addEventListener('click', () => command('reset')); $('add-fly').addEventListener('click', () => command('add')); $('speed').addEventListener('input', (event) => command('speed', { value: Number(event.target.value) })); $('decay').addEventListener('input', (event) => command('decay', { value: Number(event.target.value) })); $('hormone-toggle').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('hormone', { id: agent.id, enabled: !agent.hormone_enabled }); }); $('open-bridge').addEventListener('click', () => window.alert('Р вЂќР В»РЎРЏ Р С—Р С•Р В»Р Р…Р С•Р в„– 3D-РЎРѓРЎвЂ Р ВµР Р…РЎвЂ№ Р В·Р В°Р С—РЎС“РЎРѓРЎвЂљР С‘: scripts/run_demo.ps1 -WithBlender'));
+$('pause').addEventListener('click', () => command(state.data && state.data.running ? 'pause' : 'resume')); $('reset').addEventListener('click', () => command('reset')); $('add-fly').addEventListener('click', () => command('add')); $('speed').addEventListener('input', (event) => command('speed', { value: Number(event.target.value) })); $('decay').addEventListener('input', (event) => command('decay', { value: Number(event.target.value) })); $('hormone-toggle').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('hormone', { id: agent.id, enabled: !agent.hormone_enabled }); }); $('open-bridge').addEventListener('click', () => window.alert('Для полной 3D-сцены запусти: scripts/run_demo.ps1 -WithBlender'));
 $('adventure-select').addEventListener('change', (event) => command('adventure', { name: event.target.value }));
 
 // Training controls operate on the selected fly.
@@ -1678,7 +1678,7 @@ $('walk-burst').addEventListener('click', () => command('walk', { value: 200 }))
 // nearest other fly.
 $('gesture-cycle').addEventListener('click', () => {
   if (state.selected == null) return;
-  const order = ['Р С—Р С•Р С”Р С•Р в„–', 'Р С—РЎР‚Р С‘Р Р†Р ВµРЎвЂљРЎРѓРЎвЂљР Р†Р С‘Р Вµ', 'Р С—Р С•Р С”Р В»Р С•Р Р…', 'РЎвЂ¦Р В»Р С•Р С—Р С”Р С‘', 'РЎС“Р С”Р В°Р В·Р В°Р Р…Р С‘Р Вµ', 'РЎС“РЎвЂљР ВµРЎв‚¬Р ВµР Р…Р С‘Р Вµ', 'Р С—Р В»Р ВµРЎвЂЎР С‘Р С”Р С‘', 'Р С—РЎР‚Р С•РЎв‚¬РЎС“ Р С•Р В±Р Р…РЎРЏРЎвЂљРЎРЉ'];
+  const order = ['покой', 'приветствие', 'поклон', 'хлопки', 'указание', 'утешение', 'плечики', 'прошу обнять'];
   const agent = state.data && state.data.agents.find((item) => item.id === state.selected);
   const current = agent && agent.social ? order.indexOf(agent.social.gesture) : -1;
   command('gesture', { id: state.selected, value: ((current < 0 ? 0 : current) + 1) % 8 });

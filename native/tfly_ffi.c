@@ -236,6 +236,7 @@ void tfly_gesture_start(TFlyHandle *h, int g) { TGesture(h, g); }
 void tfly_gesture_force(TFlyHandle *h, int g) { TGestureForce(h, g); }
 const char *tfly_gesture_name(int g) { return TFlyGestureName(g); }
 const char *tfly_encounter_name(int e) { return TFlyEncounterName(e); }
+const char *tfly_gait_name(int g) { return TFlyGaitName(g); }
 int tfly_encounter(TFlyHandle *a, TFlyHandle *b, int kind) { return TEncounter(a, b, kind); }
 
 /* Tell the model how fast the body is actually travelling, so the walk phase

@@ -222,6 +222,7 @@ unsafe extern "C" {
     fn tfly_gesture_force(handle: *mut TFlyHandle, g: c_int);
     fn tfly_gesture_name(g: c_int) -> *const c_char;
     fn tfly_encounter_name(e: c_int) -> *const c_char;
+    fn tfly_gait_name(g: c_int) -> *const c_char;
     fn tfly_encounter(a: *mut TFlyHandle, b: *mut TFlyHandle, kind: c_int) -> c_int;
 
     fn tfly_to_json(handle: *mut TFlyHandle, buf: *mut c_char, cap: c_int) -> c_int;
@@ -372,6 +373,9 @@ pub mod gesture {
     pub const COVER: i32 = 5;
     pub const SHRUG: i32 = 6;
     pub const HOLD: i32 = 7;
+    /// `TFLY_N_GESTURE`. Index 0 is idle, which the core has no name for
+    /// beyond "no pose is being held", so it falls through to the default.
+    pub const COUNT: i32 = 8;
 }
 
 /// Encounters between two flies, matching `T_ENC_*`.
@@ -383,6 +387,8 @@ pub mod encounter {
     pub const SHARE: i32 = 4;
     pub const ARGUE: i32 = 5;
     pub const IGNORE: i32 = 6;
+    /// `TFLY_N_ENCOUNTER`.
+    pub const COUNT: i32 = 7;
 }
 
 /// Gait presets the fly can learn to walk with.
@@ -393,12 +399,7 @@ pub mod gait {
     pub const WEAVING: i32 = 3;
     pub const COUNT: i32 = 4;
 
-    pub const NAMES: [&str; 4] = [
-        "РЎвЂљР С•РЎР‚Р С•Р С—Р В»Р С‘Р Р†РЎвЂ№Р в„–",
-        "РЎР‚Р С•Р Р†Р Р…РЎвЂ№Р в„–",
-        "Р Т‘Р В»Р С‘Р Р…Р Р…РЎвЂ№Р в„–",
-        "Р С—Р ВµРЎвЂљР В»РЎРЏРЎР‹РЎвЂ°Р С‘Р в„–",
-    ];
+    pub const NAMES: [&str; 4] = ["торопливый", "ровный", "длинный", "петляющий"];
 }
 
 /// Drives, matching `T_DRIVE_*`.
@@ -698,6 +699,17 @@ impl Fly {
     }
     pub fn dominant_emotion(&self) -> &'static str {
         cstr_to_name(unsafe { tfly_emotion_name(tfly_dominant_emotion(self.ptr())) })
+    }
+    /// The C core's own key for an emotion, by index.
+    ///
+    /// This is the authority on the `T_EMO_*` order. The editor keeps a second
+    /// list of names and a second list of keys for display, and a test compares
+    /// both against this rather than against each other, so a list that is
+    /// shifted by one is caught instead of silently pairing "радость" with
+    /// "sadness".
+    #[must_use]
+    pub fn emotion_key(id: i32) -> &'static str {
+        cstr_to_name(unsafe { tfly_emotion_name(id) })
     }
     pub fn dominant_drive(&self) -> &'static str {
         cstr_to_name(unsafe { tfly_drive_name(tfly_dominant_drive(self.ptr())) })
@@ -1456,6 +1468,16 @@ impl Fly {
     #[must_use]
     pub fn encounter_name(encounter: i32) -> &'static str {
         cstr_to_name(unsafe { tfly_encounter_name(encounter) })
+    }
+    /// Russian name of a gait, by index.
+    ///
+    /// The core is the authority here too. The editor keeps its own list for
+    /// the rig to bind to, and a test compares the two, because a name that
+    /// drifted between the two tables would leave a character reporting a gait
+    /// as though it were a gesture.
+    #[must_use]
+    pub fn gait_name(gait: i32) -> &'static str {
+        cstr_to_name(unsafe { tfly_gait_name(gait) })
     }
 
     /// The gait the fly currently prefers, breaking ties with its own RNG.
