@@ -7,12 +7,33 @@ ASCII and survive any transport.
 
 Mojibake has a shape: a real Russian name is Cyrillic letters and a handful
 of typographic marks. Damaged text is Latin-1 supplement, box drawing,
-U+FFFD, or Cyrillic letters that are not Russian, such as U+0455.
+U+FFFD, Cyrillic letters that are not Russian, a word holding both
+alphabets, or a curly quote welded to a Cyrillic letter. The last two matter
+most, because the characters in them are individually all fine.
 """
 
+import re
 import sys
 import unicodedata
 from pathlib import Path
+
+# Every file that can hold text a person reads. The C core and the shim are in
+# the list because they carry the Russian names of gaits, gestures and
+# encounters, and those reach the screen.
+SCANNED = [
+    "src/editor.rs",
+    "src/tfly.rs",
+    "src/main.rs",
+    "src/lib.rs",
+    "TFLY.h",
+    "native/tfly_ffi.c",
+    "native/tfly_test.c",
+    "editor/app.js",
+    "editor/index.html",
+    "editor/style.css",
+    "build.rs",
+    "README.md",
+]
 
 # Real Russian words that must be present, as escape sequences so that this
 # file is pure ASCII and cannot itself be the thing that is broken.
@@ -55,8 +76,48 @@ NOT_RUSSIAN_CYRILLIC = set(
 # Without this the check reports "U+00D7" for the multiplication sign in
 # "Учить ходить ×200" as damage, and a false alarm is worse than none.
 ALLOWED_NON_ASCII = set(
-    "\u00ab\u00bb\u2014\u2013\u2026\u00d7\u00b7\u00b0\u2116\u00ab"
+    "\u00ab\u00bb\u2014\u2013\u2026\u00d7\u00b7\u00b0\u2116"
 )
+
+# Curly quotes. The text does not use them, and they are the one thing a
+# mis-decoded run reliably glues to a Cyrillic letter: the middot comes back
+# as three Cyrillic letters and a stray apostrophe, and the multiplication
+# sign as four letters and a pair of curly quotes. Every character in those is
+# one the Russian alphabet has, so all the per-character rules below pass them,
+# and only a rule about what may sit next to what catches them.
+CURLY = set("\u2018\u2019\u201a\u201c\u201d\u201e")
+
+WORD = re.compile(r"[^\W\d_]+", re.UNICODE)
+
+
+def is_cyrillic(ch: str) -> bool:
+    return 0x0400 <= ord(ch) <= 0x04FF
+
+
+def is_latin(ch: str) -> bool:
+    return (0x41 <= ord(ch) <= 0x5A) or (0x61 <= ord(ch) <= 0x7A)
+
+
+def mixed_script(text: str) -> list[str]:
+    """Words holding both alphabets, which no real word in here does."""
+    found = []
+    for word in WORD.findall(text):
+        if any(is_cyrillic(c) for c in word) and any(is_latin(c) for c in word):
+            found.append(word)
+    return found
+
+
+def curly_on_cyrillic(text: str) -> list[str]:
+    """A curly quote touching a Cyrillic letter, which is always damage."""
+    found = []
+    for i, ch in enumerate(text):
+        if ch not in CURLY:
+            continue
+        before = text[i - 1] if i else ""
+        after = text[i + 1] if i + 1 < len(text) else ""
+        if is_cyrillic(before) or is_cyrillic(after):
+            found.append(text[max(0, i - 6) : i + 7])
+    return found
 
 
 def audit(path: Path) -> tuple[int, dict[str, int]]:
@@ -86,32 +147,41 @@ def audit(path: Path) -> tuple[int, dict[str, int]]:
 
 def main() -> int:
     bad = 0
-    for name, words in EXPECTED.items():
+    for name in SCANNED:
         path = Path(name)
         if not path.exists():
-            print(f"{name}: MISSING")
-            bad += 1
+            print(f"SKIP {name:<22} absent")
             continue
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError as exc:
-            print(f"{name}: NOT VALID UTF-8 ({exc})")
+            print(f"BAD  {name:<22} NOT VALID UTF-8 ({exc})")
             bad += 1
             continue
-        # Case-insensitive, because most of these words are also headings and
-        # a capitalised "Персонажи" is the same evidence as a lowercase one.
-        haystack = text.lower()
-        missing = [w for w in words if w.lower() not in haystack]
+
         _, counts = audit(path)
         problems = []
+        # A word that ought to be there is evidence the text survived, so its
+        # absence is a defect: it means a label was lost rather than mangled.
+        # Case-insensitive, because most of these are headings too, and a
+        # capitalised "Персонажи" is the same evidence as a lowercase one.
+        haystack = text.lower()
+        missing = [w for w in EXPECTED.get(name, []) if w.lower() not in haystack]
         if missing:
-            problems.append(f"missing {len(missing)}/{len(words)} words")
+            problems.append(f"missing {len(missing)} words")
         if counts["replacement"]:
             problems.append(f"{counts['replacement']} replacement chars")
         if counts["latin1"]:
             problems.append(f"{counts['latin1']} latin1 chars")
         if counts["not_russian_cyrillic"]:
             problems.append(f"{counts['not_russian_cyrillic']} non-Russian Cyrillic")
+        mixed = mixed_script(text)
+        if mixed:
+            problems.append(f"{len(mixed)} mixed-alphabet words: {mixed[:4]}")
+        glued = curly_on_cyrillic(text)
+        if glued:
+            problems.append(f"{len(glued)} curly quotes on Cyrillic: {glued[:3]}")
+
         status = "OK  " if not problems else "BAD "
         print(
             f"{status}{name:<22} cyrillic={counts['cyrillic']:<7}"

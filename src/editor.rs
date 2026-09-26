@@ -2103,7 +2103,7 @@ impl EditorRuntime {
                     drive: drive.to_owned(),
                     decision: decision.to_owned(),
                     attention: format!(
-                        "odor {:.0}% Р вЂ™Р’В· light {:.0}% Р вЂ™Р’В· touch {:.0}%",
+                        "odor {:.0}% · light {:.0}% · touch {:.0}%",
                         agent.odor * 100.0,
                         agent.light * 100.0,
                         agent.touch * 100.0
