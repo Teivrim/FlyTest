@@ -97,3 +97,48 @@ jobs:
           cargo clippy --all-targets --message-format=short 2>&1 \
             | grep -E ': (warning|error)' | head -20 || true
           echo "clippy отработал, сборку не роняем."
+
+  # Полный прогон. Отдельным job, потому что он проверяет то, чего нет в сборке:
+  # C-тесты ядра, синтаксис браузерного клиента, русский текст и лимит памяти.
+  # Пока эти проверки жили только в голове у того, кто их запускал, они
+  # запускались ровно до тех пор, пока про него помнили.
+  gate:
+    name: Полный прогон (тесты + лимит 100 МБ)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Подготовить MinGW
+        run: |
+          $candidates = @("C:\mingw64\bin", "C:\msys64\mingw64\bin",
+                          "C:\ProgramData\mingw64\mingw64\bin")
+          $found = $null
+          foreach ($c in $candidates) {
+            if (Test-Path (Join-Path $c "g++.exe")) { $found = $c; break }
+          }
+          if ($found) {
+            "MinGW найден: $found"
+            Add-Content -Path $env:GITHUB_PATH -Value $found -Encoding ascii
+          } else {
+            "MinGW не найден: C-тесты будут пропущены, остальное идёт."
+          }
+
+      - name: Установить Rust
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update
+          rustup default stable-x86_64-pc-windows-gnu
+
+      - name: Установить Python и Node
+        run: |
+          "python: $((python --version) 2>&1)"
+          "node:   $(node --version)"
+
+      - name: Полный прогон
+        run: |
+          # -SkipMemory нет: сто мегабайт это требование, а не пожелание, и
+          # проверять его надо на каждом пуше, а не когда вспомнится.
+          .\scripts\check_all.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

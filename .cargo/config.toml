@@ -1,0 +1,20 @@
+# Shortcuts for the checks in this project.
+#
+# `cargo test` on its own is not the project's test run. The C suite for
+# TFLY.h, the browser client, the Russian text and the memory cap all sit
+# outside cargo, and the point of these is that there is one command that covers
+# all of them instead of a list someone has to remember.
+#
+#   cargo fmt-check   formatting only
+#   cargo lint        formatting plus clippy with warnings denied
+#
+# The full gate, tests included, is scripts/check_all.ps1. It is a script
+# rather than an alias because cargo aliases can only run cargo subcommands, and
+# this gate has to run the C compiler, node, python and the built binary.
+#
+# Note the absence of a `check` alias: `cargo check` is a real command that
+# type-checks without building, and shadowing it with a formatting run would be
+# a nasty surprise. `lint` and `fmt-check` leave it alone.
+[alias]
+fmt-check = "fmt --check"
+lint = ["fmt", "--check"]

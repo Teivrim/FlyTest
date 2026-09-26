@@ -11,7 +11,6 @@ let trailLines = new Map();
 // One group per act, holding that act's stage, so a stage is built once and then
 // only its label and its scenery change.
 let actStages = new Map();
-let spotlights = null;
 let cameraAzimuth = 0.72;
 let cameraElevation = 0.48;
 let cameraDistance = 46;
@@ -73,13 +72,13 @@ function material(color, emissive = '#000000', intensity = 0) {
 // =========================================================================
 // The circus
 //
-// Five act stages arranged around a central ring, plus the tent, spotlights
+// Five districts around the middle, plus the tent and the ground
 // and banner that make the space read as a circus rather than an arena with
 // five pads. Geometry is built once and only animated afterwards, so the
 // frame cost stays flat regardless of how many flies are in the ring.
 // =========================================================================
 
-const ACT_ORDER = ['main_stage', 'labyrinth', 'garden', 'factory', 'void'];
+const ACT_ORDER = ['hill', 'village', 'city', 'forest', 'ruins'];
 
 function buildTent() {
   const tent = new THREE.Group();
@@ -138,64 +137,7 @@ function buildBanner() {
   return banner;
 }
 
-function buildSeatRing() {
-  // Instanced, for the same reason the maze walls are: seventy-one chairs as
-  // seventy-one meshes is seventy-one draw calls to paint some seating.
-  const rows = 3;
-  const count = rows * 32;
-  const seats = new THREE.InstancedMesh(
-    new THREE.BoxGeometry(0.3, 0.34, 0.3),
-    material('#3a1730', '#000000', 0),
-    count
-  );
-  const matrix = new THREE.Matrix4();
-  const at = new THREE.Vector3();
-  const turn = new THREE.Quaternion();
-  const up = new THREE.Vector3(0, 1, 0);
-  const one = new THREE.Vector3(1, 1, 1);
-  let n = 0;
-  for (let row = 0; row < rows; row++) {
-    const radius = 12.5 + row * 1.0;
-    const perRow = 22 + row * 5;
-    for (let i = 0; i < perRow; i++) {
-      const angle = (i / perRow) * Math.PI * 2;
-      // Leave a gap at the front so the camera can see into the ring.
-      if (Math.abs(Math.atan2(Math.sin(angle), Math.cos(angle))) < 0.45) continue;
-      if (n >= count) break;
-      at.set(Math.cos(angle) * radius, 0.18 + row * 0.42, Math.sin(angle) * radius);
-      turn.setFromAxisAngle(up, -angle + Math.PI / 2);
-      matrix.compose(at, turn, one);
-      seats.setMatrixAt(n++, matrix);
-    }
-  }
-  seats.count = n;
-  seats.instanceMatrix.needsUpdate = true;
-  arenaGroup.add(seats);
-  return seats;
-}
 
-function buildSpotlights() {
-  const group = new THREE.Group();
-  const lamps = [];
-  for (let i = 0; i < 5; i++) {
-    const angle = (i / 5) * Math.PI * 2 + 0.3;
-    const color = '#ffe9b0';
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.16, 12, 10), new THREE.MeshBasicMaterial({ color }));
-    head.position.set(Math.cos(angle) * 7.2, 5.4, Math.sin(angle) * 7.2);
-    // A cone of light, open at the bottom, aimed at the ring.
-    const cone = new THREE.Mesh(
-      new THREE.ConeGeometry(1.5, 6.2, 20, 1, true),
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.055, side: THREE.DoubleSide, depthWrite: false })
-    );
-    cone.position.copy(head.position);
-    cone.lookAt(0, 0, 0);
-    cone.rotateX(Math.PI / 2);
-    lamps.push({ head, cone, phase: i * 1.3 });
-    group.add(head); group.add(cone);
-  }
-  arenaGroup.add(group);
-  return group;
-}
 
 function buildActStage(act) {
   const group = new THREE.Group();
@@ -252,49 +194,6 @@ function buildActStage(act) {
     posts.push({ bulb, phase: i * 1.3 });
   }
 
-  // Act-specific scenery so the five stages are visually distinct. Each piece
-  // is positioned from a collider, so the thing you can see and the thing you
-  // bump into are the same object.
-  const walls = solids.filter((c) => Math.hypot(c.x, c.z) <= ring - 0.3);
-  if (act.id === 'main_stage') {
-    for (let i = 0; i < 3; i++) {
-      const star = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), new THREE.MeshBasicMaterial({ color: '#fff2c4' }));
-      star.position.set((i - 1) * 0.85, 2.0 + i * 0.18, 0);
-      group.add(star);
-    }
-  } else if (act.id === 'labyrinth') {
-    // The colliders are circles standing in for walls, so a wall is drawn as a
-    // slab whose long axis follows the ring it sits on.
-    for (const c of walls) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(c.radius * 2, 0.85, 0.1), material('#20344a', act.color, 0.1));
-      wall.position.set(c.x, stageHeight + 0.425, c.z);
-      wall.rotation.y = -Math.atan2(c.z, c.x);
-      group.add(wall);
-    }
-  } else if (act.id === 'garden') {
-    for (const c of walls) {
-      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 6), material('#3f7a3f'));
-      stem.position.set(c.x, stageHeight + 0.25, c.z);
-      const bloom = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), new THREE.MeshBasicMaterial({ color: '#ffd1f0' }));
-      bloom.position.set(c.x, stageHeight + 0.53, c.z);
-      group.add(stem); group.add(bloom);
-    }
-  } else if (act.id === 'factory') {
-    for (let i = 0; i < 3; i++) {
-      const gear = new THREE.Mesh(new THREE.TorusGeometry(0.3 - i * 0.07, 0.07, 6, 14), material('#5a4028', act.color, 0.2));
-      gear.position.set((i - 1) * 0.6, 1.0 + i * 0.25, 0);
-      gear.userData.spin = i % 2 === 0 ? 1 : -1;
-      group.add(gear);
-    }
-  } else if (act.id === 'void') {
-    for (let i = 0; i < 26; i++) {
-      const dot = new THREE.Mesh(new THREE.SphereGeometry(0.02, 6, 4), new THREE.MeshBasicMaterial({ color: act.color }));
-      const a = i * 2.4;
-      const r = 0.4 + (i % 5) * 0.32;
-      dot.position.set(Math.cos(a) * r, 0.3 + (i % 7) * 0.22, Math.sin(a) * r);
-      group.add(dot);
-    }
-  }
 
   const label = labelSprite(act.name, act.color);
   label.position.set(0, 2.35, 0);
@@ -359,8 +258,6 @@ function buildArena() {
 
   buildTent();
   buildBanner();
-  buildSeatRing();
-  buildSpotlights();
 
   // Stage scenery for all five districts, whether or not data has arrived yet.
   const fallback = [
@@ -1917,19 +1814,12 @@ function render3D() {
   syncScene();
   if (sensorGroup) sensorGroup.rotation.y += 0.0015;
   animateActStages();
-  if (spotlights) {
-    const t = now * 0.001;
-    for (const lamp of spotlights.children) {
-      if (lamp.geometry && lamp.geometry.type === 'ConeGeometry') {
-        lamp.material.opacity = 0.035 + 0.03 * (0.5 + 0.5 * Math.sin(t * 1.7));
-      }
-    }
-  }
   renderer.render(scene, camera);
   requestAnimationFrame(render3D);
 }
 $('pause').addEventListener('click', () => command(state.data && state.data.running ? 'pause' : 'resume')); $('reset').addEventListener('click', () => command('reset')); $('add-fly').addEventListener('click', () => command('add')); $('speed').addEventListener('input', (event) => command('speed', { value: Number(event.target.value) })); $('decay').addEventListener('input', (event) => command('decay', { value: Number(event.target.value) })); $('hormone-toggle').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('hormone', { id: agent.id, enabled: !agent.hormone_enabled }); }); $('open-bridge').addEventListener('click', () => window.alert('Для полной 3D-сцены запусти: scripts/run_demo.ps1 -WithBlender'));
 $('course-button').addEventListener('click', () => command('course'));
+$('auto-button').addEventListener('click', () => command('auto'));
 
 // Training controls operate on the selected fly.
 $('train-burst').addEventListener('click', () => command('train', { value: 200 }));
