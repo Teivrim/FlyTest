@@ -1045,7 +1045,66 @@ static void test_limbs(void) {
     }
     check(1, "the foot stays between the hip and a stretched leg, on every gait");
 
+    /* The walk has to follow the ground, not its own clock. A cycle that runs
+     * faster than the body travels drags the feet backwards, which is the
+     * single most visible way a walk can be wrong. */
+    {
+        TFLY walker;
+        TNew(&walker);
+        TSeed(&walker, 61);
+        TSetGait(&walker, 1);
+        TGroundSpeed(&walker, 0.8f);
+        float first = walker.gait_phase;
+        for (int i = 0; i < 300; i++) TSteps(&walker, 1, 1.0f / 60.0f);
+        float advanced = walker.gait_phase - first;
+        /* Five seconds at 0.8 per second is four units of ground. With a step
+         * near 0.2 that is about twenty steps, or ten cycles. */
+        checkf(advanced > 50.0f && advanced < 80.0f,
+               "the phase advances at the rate the ground implies (%.1f rad in 5 s at 0.8/s)",
+               advanced);
+
+        /* Twice the ground speed must be twice the steps. Anything else means
+         * the feet slide, which is the whole thing this fixes. */
+        TFLY fast;
+        TNew(&fast);
+        TSeed(&fast, 61);
+        TSetGait(&fast, 1);
+        TGroundSpeed(&fast, 1.6f);
+        for (int i = 0; i < 300; i++) TSteps(&fast, 1, 1.0f / 60.0f);
+        checkf(fast.steps > walker.steps * 1.8f && fast.steps < walker.steps * 2.2f,
+               "double the ground speed is double the steps (%.1f against %.1f)", fast.steps,
+               walker.steps);
+    }
+
+    /* Standing still settles into a stance instead of marching on the spot.
+     *
+     * Sleep is used to make her genuinely still, because the policy recomputes
+     * thrust every tick and a fly that wants to walk cannot be talked out of it
+     * by writing zero into the motor channel.
+     *
+     * The measure is the distance to the nearest half cycle, because a planted
+     * leg is whichever of the two is down. Taking a plain remainder would read
+     * a phase a hair below zero as a whole cycle of error. */
+    {
+        TFLY idle;
+        TNew(&idle);
+        TSeed(&idle, 71);
+        TGroundSpeed(&idle, 0.9f);
+        for (int i = 0; i < 300; i++) TSteps(&idle, 1, 1.0f / 60.0f);
+        float moving = fabsf(fmodf(idle.gait_phase, 3.14159265f));
+        if (moving > 1.5707963f) moving = 3.14159265f - moving;
+        TGroundSpeed(&idle, 0.0f);
+        TSleep(&idle);
+        for (int i = 0; i < 300; i++) TSteps(&idle, 1, 1.0f / 60.0f);
+        float still = fabsf(fmodf(idle.gait_phase, 3.14159265f));
+        if (still > 1.5707963f) still = 3.14159265f - still;
+        checkf(moving > still, "a still fly settles out of her stride (%.3f to %.3f)", moving,
+               still);
+        checkf(still < 0.5f, "and settles on a planted leg (%.3f)", still);
+    }
+
     /* A null fly must be safe, because a caller can always be wrong. */
+    TGroundSpeed(NULL, 1.0f);
     TGaitLimbs(NULL, l);
     check(1, "a null fly has no limbs to pose");
     TFootDrop(NULL, 0.1f, 0.1f, 0.017f, 0.0192f, 0.0432f, 0.020f);

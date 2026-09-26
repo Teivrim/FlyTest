@@ -238,6 +238,10 @@ const char *tfly_gesture_name(int g) { return TFlyGestureName(g); }
 const char *tfly_encounter_name(int e) { return TFlyEncounterName(e); }
 int tfly_encounter(TFlyHandle *a, TFlyHandle *b, int kind) { return TEncounter(a, b, kind); }
 
+/* Tell the model how fast the body is actually travelling, so the walk phase
+ * follows the ground instead of its own clock. */
+void tfly_ground_speed(TFlyHandle *h, float v) { TGroundSpeed(h, v); }
+
 /* ---- gait ---- */
 void tfly_set_gait(TFlyHandle *h, int g) { TSetGait(h, g); }
 float tfly_gait_weight(TFlyHandle *h, int g) { return TGaitWeight(h, g); }

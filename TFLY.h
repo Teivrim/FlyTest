@@ -349,6 +349,9 @@ typedef struct {
     float gait_sway;     /* how much it wavers, 0..1 */
     float gait_approach; /* pull toward a mate, 0..1 */
     float gait_phase;   /* accumulated walk cycle, radians */
+    /* Distance actually covered per second, supplied by the world. The walk
+     * phase is locked to it so the feet plant where they are put down. */
+    float ground_speed;
     float steps;         /* lifetime step count */
     float balance;       /* 1 stable, 0 falling over */
     unsigned gait_weight[TFLY_N_GAIT];
@@ -968,6 +971,23 @@ static inline void TGaitLimbs(const TFLY *fly, TFLYLimb out[TFLY_N_LIMB]) {
         al->spread = TClamp(al->spread + 0.5f * w, -1.0f, 1.0f);
         ar->spread = TClamp(ar->spread + 0.5f * w, -1.0f, 1.0f);
     }
+}
+
+/*
+ * Ground speed, the distance actually covered per second.
+ *
+ * This is what locks the walk cycle to the ground. The phase used to advance
+ * on its own clock at a rate chosen from the cadence, which has nothing to do
+ * with how fast the body is travelling: the legs would cycle several times
+ * faster than the ground moved and the feet would skate backwards, dragging
+ * along like a skate being pulled.
+ *
+ * The world knows how far the body moved. The model owns the rule that a step
+ * covers a step length, so it needs the measurement and not the conclusion.
+ */
+static inline void TGroundSpeed(TFLY *fly, float speed) {
+    if (fly == NULL) return;
+    fly->ground_speed = TMax(0.0f, speed);
 }
 
 /* Where the lowest foot ends up, relative to the hip, for a given leg pose.
@@ -1603,10 +1623,37 @@ static inline void TUpdate(TFLY *fly, float dt) {
      * learning something to converge on. */
     {
         float pace = TClamp(fly->out_thrust, 0.0f, 1.0f);
-        float hz = 0.6f + 3.4f * fly->gait_cadence;     /* steps per second */
         float step_len = 0.10f + 0.22f * fly->gait_stride;
+        /* A fast-cadence walk takes shorter steps, so the two are not
+         * independent: for a given ground speed, a high cadence means more of
+         * them. This is what makes the learned stride change how she walks
+         * rather than just how fast the legs swing. */
+        step_len *= 1.0f - 0.35f * fly->gait_cadence;
         float prev_phase = fly->gait_phase;
-        fly->gait_phase += hz * dt * 6.2831853f;
+
+        /* How fast she is travelling, preferring the world's measurement and
+         * falling back to her own thrust when the world has not said.
+         *
+         * The fallback matters: a fly driven by her own motor with no world
+         * attached is still walking, and reading that as standing still would
+         * stop her legs and quietly end her step count. */
+        float speed = fly->ground_speed;
+        if (speed <= 1e-4f) speed = pace * (0.6f + 0.5f * fly->gait_cadence);
+
+        if (speed > 1e-4f) {
+            /* One full cycle is two steps, so the cycle rate is half the step
+             * rate the ground implies. This is what stops the feet skating:
+             * each step then covers exactly one step length of ground, so the
+             * foot lands where the body already is. */
+            float steps_per_second = speed / TMax(step_len, 0.02f);
+            fly->gait_phase += 0.5f * steps_per_second * dt * 6.2831853f;
+        } else {
+            /* Standing still settles into a stance rather than cycling on the
+             * spot, which would look like marching to nowhere. */
+            float wrapped = fmodf(fly->gait_phase, 6.2831853f);
+            float neutral = (wrapped > 3.14159265f) ? 6.2831853f : 0.0f;
+            fly->gait_phase += (neutral - fly->gait_phase) * TClamp(3.0f * dt, 0.0f, 1.0f);
+        }
         /* Count whole steps, not phase revolutions. */
         float before = (float)(long)(prev_phase / 3.14159265f);
         float after = (float)(long)(fly->gait_phase / 3.14159265f);

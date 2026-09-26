@@ -188,37 +188,50 @@ function buildActStage(act) {
   const [x, z] = act.origin;
   group.position.set(x, 0, z);
 
+  // The stage's own dimensions come from the server, which is also what the
+  // runtime collides against. Keeping a second copy here is how a wall ends up
+  // in one place and its collider in another, and the bug is invisible until
+  // somebody walks through a wall.
+  const stageRadius = act.stage_radius ?? 1.7;
+  const stageHeight = act.stage_height ?? 0.17;
+
   // A raised disc, tinted with the act colour.
   const disc = new THREE.Mesh(
-    new THREE.CylinderGeometry(1.7, 1.85, 0.16, 40),
+    new THREE.CylinderGeometry(stageRadius, stageRadius * 1.088, stageHeight, 40),
     material('#141d2c', act.color, 0.18)
   );
-  disc.position.y = 0.09;
+  disc.position.y = stageHeight * 0.5;
   disc.receiveShadow = true;
   group.add(disc);
 
   // A low wall of light marking the stage edge.
   const rim = new THREE.Mesh(
-    new THREE.TorusGeometry(1.72, 0.045, 8, 48),
+    new THREE.TorusGeometry(stageRadius + 0.02, 0.045, 8, 48),
     new THREE.MeshBasicMaterial({ color: act.color, transparent: true, opacity: 0.75 })
   );
   rim.rotation.x = Math.PI / 2;
-  rim.position.y = 0.18;
+  rim.position.y = stageHeight + 0.01;
   group.add(rim);
 
-  // Four corner posts with a glowing top, like a ring frame.
-  const posts = [];
-  for (let i = 0; i < 4; i++) {
-    const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+  // Corner posts, placed from the server's collider list so they cannot drift
+  // away from the things that stop a character walking through them. The four
+  // outermost solids on the ring are the posts.
+  const solids = (act.colliders || []).filter((c) => c.radius > 0);
+  const ring = Math.max(...solids.map((c) => Math.hypot(c.x, c.z)), 1.5);
+  const posts = solids.filter((c) => Math.hypot(c.x, c.z) > ring - 0.3);
+  for (let i = 0; i < posts.length; i++) {
+    const c = posts[i];
     const post = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.06, 1.5, 8), material('#2a3a52'));
-    post.position.set(Math.cos(a) * 1.5, 0.8, Math.sin(a) * 1.5);
+    post.position.set(c.x, stageHeight + 0.75, c.z);
     const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.09, 10, 8), new THREE.MeshBasicMaterial({ color: act.color }));
-    bulb.position.set(Math.cos(a) * 1.5, 1.58, Math.sin(a) * 1.5);
-    posts.push({ post, bulb, phase: i * 0.7 });
+    bulb.position.set(c.x, stageHeight + 1.53, c.z);
     group.add(post); group.add(bulb);
   }
 
-  // Act-specific scenery so the five stages are visually distinct.
+  // Act-specific scenery so the five stages are visually distinct. Each piece
+  // is positioned from a collider, so the thing you can see and the thing you
+  // bump into are the same object.
+  const walls = solids.filter((c) => Math.hypot(c.x, c.z) <= ring - 0.3);
   if (act.id === 'main_stage') {
     for (let i = 0; i < 3; i++) {
       const star = new THREE.Mesh(new THREE.SphereGeometry(0.16, 8, 6), new THREE.MeshBasicMaterial({ color: '#fff2c4' }));
@@ -226,20 +239,20 @@ function buildActStage(act) {
       group.add(star);
     }
   } else if (act.id === 'labyrinth') {
-    for (let i = 0; i < 5; i++) {
-      const wall = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.85, 0.1), material('#20344a', act.color, 0.1));
-      const a = i * 1.05;
-      wall.position.set(Math.cos(a) * 0.95, 0.5, Math.sin(a) * 0.95);
-      wall.rotation.y = -a;
+    // The colliders are circles standing in for walls, so a wall is drawn as a
+    // slab whose long axis follows the ring it sits on.
+    for (const c of walls) {
+      const wall = new THREE.Mesh(new THREE.BoxGeometry(c.radius * 2, 0.85, 0.1), material('#20344a', act.color, 0.1));
+      wall.position.set(c.x, stageHeight + 0.425, c.z);
+      wall.rotation.y = -Math.atan2(c.z, c.x);
       group.add(wall);
     }
   } else if (act.id === 'garden') {
-    for (let i = 0; i < 7; i++) {
-      const a = i * 0.9;
+    for (const c of walls) {
       const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.5, 6), material('#3f7a3f'));
-      stem.position.set(Math.cos(a) * 1.15, 0.4, Math.sin(a) * 1.15);
-      const bloom = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), new THREE.MeshBasicMaterial({ color: i % 2 ? '#ffd1f0' : '#ffe58a' }));
-      bloom.position.set(stem.position.x, 0.68, stem.position.z);
+      stem.position.set(c.x, stageHeight + 0.25, c.z);
+      const bloom = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), new THREE.MeshBasicMaterial({ color: '#ffd1f0' }));
+      bloom.position.set(c.x, stageHeight + 0.53, c.z);
       group.add(stem); group.add(bloom);
     }
   } else if (act.id === 'factory') {
@@ -995,7 +1008,11 @@ function syncScene() {
       // The hip offset matters: `drop` is measured from the hip, and the hip
       // sits above the rig root, so the root goes a little lower than the drop
       // alone would suggest. Getting this wrong leaves the feet hovering.
-      ud.rig.position.y = -drop - RIG.leg.hipHeight;
+      //
+      // `ground` is the surface she is standing on, not always the tent floor.
+      // A stage is a raised disc, and a character placed at a flat zero stands
+      // ankle-deep inside every stage she walks onto.
+      ud.rig.position.y = (agent.ground || 0) - drop - RIG.leg.hipHeight;
     }
 
     ud.torso.rotation.x = pose.spineX + pose.lean;

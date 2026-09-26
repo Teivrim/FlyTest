@@ -166,6 +166,7 @@ unsafe extern "C" {
     fn tfly_gait_phase(handle: *mut TFlyHandle) -> c_float;
     fn tfly_step_count(handle: *mut TFlyHandle) -> c_float;
     fn tfly_balance(handle: *mut TFlyHandle) -> c_float;
+    fn tfly_ground_speed(handle: *mut TFlyHandle, v: c_float);
     fn tfly_blink(handle: *mut TFlyHandle) -> c_float;
     fn tfly_gaze_x(handle: *mut TFlyHandle) -> c_float;
     fn tfly_gaze_y(handle: *mut TFlyHandle) -> c_float;
@@ -1187,6 +1188,17 @@ impl Fly {
     #[must_use]
     pub fn step_count(&self) -> f32 {
         unsafe { tfly_step_count(self.ptr()) }
+    }
+
+    /// Tell the model how fast the body is actually travelling, in world units
+    /// per second.
+    ///
+    /// The walk phase follows this rather than a clock of its own, so each step
+    /// covers exactly one step length of ground and the feet land where the
+    /// body already is. Without it the legs cycle several times faster than the
+    /// ground moves and the character skates.
+    pub fn ground_speed(&mut self, speed: f32) {
+        unsafe { tfly_ground_speed(self.ptr(), speed) }
     }
 
     /// Stability, 1 upright and 0 about to fall over.
