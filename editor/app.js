@@ -8,7 +8,8 @@ let arenaGroup;
 let sensorGroup;
 let flyVisuals = new Map();
 let trailLines = new Map();
-let goalMarker;
+// One group per act, holding that act's stage, so a stage is built once and then
+// only its label and its scenery change.
 let actStages = new Map();
 let spotlights = null;
 let cameraAzimuth = 0.72;
@@ -320,11 +321,6 @@ function buildArena() {
   center.position.y = 0.08; center.castShadow = true; arenaGroup.add(center);
 
   sensorGroup = new THREE.Group(); arenaGroup.add(sensorGroup);
-
-  goalMarker = new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 10), new THREE.MeshBasicMaterial({ color: '#ffb86b' }));
-  goalMarker.position.set(0, 0.3, 0); arenaGroup.add(goalMarker);
-  const goalRing = new THREE.Mesh(new THREE.TorusGeometry(0.42, 0.025, 8, 32), new THREE.MeshBasicMaterial({ color: '#ffb86b', transparent: true, opacity: 0.8 }));
-  goalRing.rotation.x = Math.PI / 2; goalRing.position.y = 0.05; goalMarker.userData.ring = goalRing; arenaGroup.add(goalRing);
 
   // Circus dressing, built before the act stages so the stages sit on top.
   buildTent();
@@ -1137,7 +1133,7 @@ function syncScene() {
     const positions = trail.geometry.attributes.position.array; for (let i = 0; i < 36; i++) { const point = history[Math.max(0, history.length - 36 + i)] || agent.position; positions[i * 3] = point[0]; positions[i * 3 + 1] = point[2] + 0.04; positions[i * 3 + 2] = point[1]; } trail.geometry.attributes.position.needsUpdate = true;
     const puffGroup = visual.userData.puffGroup; const puffLevel = agent.puff_level; puffGroup.visible = puffLevel > 0.02; if (puffGroup.visible) { const drift = 1 - puffLevel; puffGroup.scale.setScalar(0.55 + drift * 2.1); puffGroup.position.set(drift * 0.5, 0.1 + drift * 0.35, 0.4 + drift * 0.5); puffGroup.children.forEach((puff, puffIndex) => { puff.material.opacity = puffLevel * (0.55 - puffIndex * 0.12); puff.position.x = puffIndex * 0.09 * (1 + drift) + Math.sin(performance.now() * 0.005 + puffIndex) * 0.05; puff.position.z = puffIndex * 0.07 + drift * 0.3; }); }
   });
-  drawCourse();
+  drawCourses();
 }
 
 // The course: the maze, the food, and the breadcrumbs the characters leave.
@@ -1146,86 +1142,145 @@ function syncScene() {
 // from the same segments the runtime collides against, so what is on screen is what
 // stops a character; redrawing them every frame would be sixty allocations a second
 // for a picture that does not change.
-let courseBuilt = null;
-let courseGroup = null;
-let foodMarker = null;
+
+// The courses: a maze on every stage, the food at the end of each, and the
+// breadcrumbs the characters leave behind them.
+//
+// Rebuilt only when a maze actually changes, which the seed tells us. The walls
+// are drawn from the very segments the runtime collides against, so what is on
+// screen is what stops a character. Redrawing them every frame would be a
+// handful of allocations per frame for a picture that does not move, which is the
+// same mistake the runtime was making on the other side of the socket.
+const courseScenery = new Map();
 const courseTrails = new Map();
+const courseFood = new Map();
 
-function drawCourse() {
-  const course = state.data.course;
-  const stage = currentStage();
-  if (!course || !stage) { if (courseGroup) courseGroup.visible = false; if (foodMarker) foodMarker.visible = false; return; }
-  const [ox, oz] = stage.origin;
-  const key = `${course.seed}:${stage.id}`;
+function actById(id) {
+  return (state.data.acts || []).find((act) => act.id === id);
+}
 
-  if (courseBuilt !== key) {
-    courseBuilt = key;
-    if (!courseGroup) { courseGroup = new THREE.Group(); scene.add(courseGroup); }
-    while (courseGroup.children.length) {
-      const child = courseGroup.children.pop();
-      child.geometry?.dispose();
-      child.material?.dispose();
-    }
-    const height = stage.stage_height ?? 0.17;
-    for (const wall of course.walls) {
-      const slab = new THREE.Mesh(
-        new THREE.BoxGeometry(wall.half_len * 2, height * 0.62, wall.half_thick * 2),
-        material('#243349', stage.color, 0.4)
-      );
-      slab.position.set(ox + wall.x, height * 0.31, oz + wall.z);
-      slab.rotation.y = -wall.angle;
-      slab.castShadow = true;
-      slab.receiveShadow = true;
-      courseGroup.add(slab);
-    }
-    // The food, and a ring under it so it reads from across the tent.
-    if (!foodMarker) {
-      foodMarker = new THREE.Group();
+function drawCourses() {
+  const courses = state.data.courses || [];
+  const live = new Set();
+  for (const course of courses) {
+    const act = (state.data.acts || [])[course.act];
+    if (!act) continue;
+    live.add(course.act);
+    const [ox, oz] = act.origin;
+    const height = act.stage_height ?? 0.17;
+    const key = `${course.act}:${course.seed}`;
+
+    let scenery = courseScenery.get(course.act);
+    if (!scenery || scenery.userData.key !== key) {
+      if (scenery) {
+        while (scenery.children.length) {
+          const child = scenery.children.pop();
+          child.geometry?.dispose();
+          child.material?.dispose();
+        }
+        scene.remove(scenery);
+      }
+      scenery = new THREE.Group();
+      scenery.userData.key = key;
+      for (const wall of course.walls) {
+        const slab = new THREE.Mesh(
+          new THREE.BoxGeometry(wall.half_len * 2, height * 0.66, wall.half_thick * 2),
+          material('#243349', act.color, 0.35)
+        );
+        slab.position.set(ox + wall.x, height * 0.33, oz + wall.z);
+        slab.rotation.y = -wall.angle;
+        slab.castShadow = true;
+        slab.receiveShadow = true;
+        scenery.add(slab);
+      }
+      scene.add(scenery);
+      courseScenery.set(course.act, scenery);
+
+      // The food and a ring under it, so it reads from across the tent.
+      let food = courseFood.get(course.act);
+      if (food) { scene.remove(food); food.children.forEach((c) => { c.geometry?.dispose(); c.material?.dispose(); }); }
+      food = new THREE.Group();
       const crumb = new THREE.Mesh(new THREE.SphereGeometry(0.075, 14, 10), new THREE.MeshBasicMaterial({ color: '#ffd36b' }));
       crumb.position.y = 0.1;
-      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.016, 6, 26), new THREE.MeshBasicMaterial({ color: '#ffd36b', transparent: true, opacity: 0.8 }));
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.17, 0.016, 6, 26), new THREE.MeshBasicMaterial({ color: '#ffd36b', transparent: true, opacity: 0.85 }));
       ring.rotation.x = Math.PI / 2;
       ring.position.y = 0.02;
-      foodMarker.add(crumb, ring);
-      foodMarker.userData.ring = ring;
-      scene.add(foodMarker);
-    }
-    for (const trail of courseTrails.values()) { trail.geometry.dispose(); trail.material.dispose(); }
-    courseTrails.clear();
-  }
+      food.add(crumb, ring);
+      food.userData.ring = ring;
+      scene.add(food);
+      courseFood.set(course.act, food);
 
-  courseGroup.visible = true;
-  const eaten = course.fed >= course.count && course.count > 0;
-  foodMarker.visible = !eaten;
-  if (!eaten) {
-    foodMarker.position.set(ox + course.food[0], (stage.stage_height ?? 0.17) + 0.02, oz + course.food[1]);
-    const pulse = 1 + Math.sin(performance.now() * 0.005) * 0.16;
-    foodMarker.scale.setScalar(pulse);
+      for (const [id, line] of courseTrails) {
+        if (line.userData.act !== course.act) continue;
+        scene.remove(line);
+        line.geometry.dispose();
+        line.material.dispose();
+        courseTrails.delete(id);
+      }
+    }
+
+    const eaten = course.count > 0 && course.fed >= course.count;
+    const food = courseFood.get(course.act);
+    if (food) {
+      food.visible = !eaten;
+      if (!eaten) {
+        food.position.set(ox + course.food[0], height + 0.02, oz + course.food[1]);
+        food.scale.setScalar(1 + Math.sin(performance.now() * 0.005 + course.act) * 0.16);
+      }
+    }
+
+    // One line per character, in that character's colour, so the first one
+    // through is visibly the one the others are following.
+    for (const runner of course.runners) {
+      let line = courseTrails.get(runner.id);
+      if (!line || line.userData.act !== course.act) {
+        if (line) { scene.remove(line); line.geometry.dispose(); line.material.dispose(); }
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
+        const colour = (state.data.agents.find((a) => a.id === runner.id) || {}).color || '#8fd3ff';
+        line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: colour, transparent: true, opacity: 0.7 }));
+        line.frustumCulled = false;
+        line.userData.act = course.act;
+        scene.add(line);
+        courseTrails.set(runner.id, line);
+      }
+      const points = runner.trail;
+      const array = line.geometry.attributes.position.array;
+      const count = Math.min(points.length, 64);
+      for (let i = 0; i < 64; i++) {
+        const point = points[Math.max(0, count - 64 + i)] || points[count - 1] || course.start;
+        array[i * 3] = ox + point[0];
+        array[i * 3 + 1] = height + 0.03;
+        array[i * 3 + 2] = oz + point[1];
+      }
+      line.geometry.attributes.position.needsUpdate = true;
+      line.material.opacity = runner.fed ? 0.95 : 0.4;
+    }
   }
-  // One line per character, in their own colour, so the first one through is
-  // visibly the one the others are following.
-  for (const runner of course.runners) {
-    let line = courseTrails.get(runner.id);
-    if (!line) {
-      const geometry = new THREE.BufferGeometry();
-      geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(64 * 3), 3));
-      const colour = (state.data.agents.find((a) => a.id === runner.id) || {}).color || '#8fd3ff';
-      line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: colour, transparent: true, opacity: 0.7 }));
-      line.frustumCulled = false;
-      scene.add(line);
-      courseTrails.set(runner.id, line);
-    }
-    const points = runner.trail;
-    const array = line.geometry.attributes.position.array;
-    const count = Math.min(points.length, 64);
-    for (let i = 0; i < 64; i++) {
-      const point = points[Math.max(0, count - 64 + i)] || points[count - 1] || [0, 0];
-      array[i * 3] = ox + point[0];
-      array[i * 3 + 1] = (stage.stage_height ?? 0.17) + 0.03;
-      array[i * 3 + 2] = oz + point[1];
-    }
-    line.geometry.attributes.position.needsUpdate = true;
-    line.material.opacity = runner.fed ? 0.95 : 0.45;
+  for (const [act, scenery] of courseScenery) {
+    if (live.has(act)) continue;
+    scene.remove(scenery);
+    scenery.children.forEach((c) => { c.geometry?.dispose(); c.material?.dispose(); });
+    courseScenery.delete(act);
+  }
+  checkCoursesDrew(live.size);
+}
+
+// Complain once, out loud, if the mazes did not make it into the scene.
+//
+// This exists because the alternative is the failure mode this project keeps
+// producing: a function that is called every frame, throws nothing, and quietly
+// draws nothing. The panel says the maze is there, the numbers are right, the
+// console is clean, and the stage is bare floor. A missing declaration is not a
+// syntax error, so `node --check` passes it, and a screenshot needs a visible
+// window that a headless run does not have. So the page checks its own work.
+let coursesChecked = false;
+function checkCoursesDrew(expected) {
+  if (coursesChecked || !expected) return;
+  coursesChecked = true;
+  const drawn = courseScenery.size;
+  if (drawn !== expected) {
+    console.error(`course: ${expected} mazes reported by the runtime, ${drawn} drawn`);
   }
 }
 
@@ -1249,14 +1304,14 @@ function renderPanels() {
   const agent = data.agents.find((item) => item.id === state.selected) || data.agents[0]; if (!agent) return;
   $('selected-name').textContent = agent.name; $('selected-channel').textContent = agent.channel; $('input-value').textContent = agent.input_level.toFixed(2); $('reaction-value').textContent = agent.reaction_level.toFixed(2); $('nt-value').textContent = agent.neurotransmitter; $('energy-value').textContent = agent.energy.toFixed(2); $('input-meter').style.width = `${agent.input_level * 100}%`; $('reaction-meter').style.width = `${agent.reaction_level * 100}%`; $('hormone-meter').style.width = `${agent.hormone_level * 100}%`; $('energy-meter').style.width = `${agent.energy * 100}%`; $('speed').value = data.speed; $('speed-value').textContent = `${data.speed.toFixed(2)}×`; $('decay').value = data.decay; $('decay-value').textContent = data.decay.toFixed(2); $('hormone-toggle').textContent = agent.hormone_enabled ? 'ON' : 'OFF'; $('signal-bar').style.width = `${agent.input_level * 100}%`; $('reaction-bar').style.width = `${agent.reaction_level * 100}%`; $('hormone-bar').style.width = `${agent.hormone_level * 100}%`;
   $('drive').textContent = `${intentLabel(agent.drive)} · ${agent.drive}`; $('decision').textContent = intentLabel(agent.decision); $('attention').textContent = agent.attention; $('confidence').textContent = `confidence ${Math.round(agent.confidence * 100)}%`;
-  const course = data.course;
-  $('course-round').textContent = `раунд ${course.round}`;
+  const course = (data.courses || [])[data.training.current_act] || {};
+  $('course-round').textContent = `раунд ${course.round || 0}`;
   $('course-goal').textContent = course.count
     ? `дошли до еды: ${course.fed} из ${course.count}`
     : 'дойти до еды в конце лабиринта';
-  $('course-count').textContent = `${course.fed} / ${course.count}`;
-  $('course-time').value = Math.max(0, Math.min(1, course.time_left / (course.round_length || 1)));
-  $('course-seed').textContent = `лабиринт seed ${course.seed} · длина хода ${course.path_length.toFixed(1)}`;
+  $('course-count').textContent = `${course.fed || 0} / ${course.count || 0}`;
+  $('course-time').value = Math.max(0, Math.min(1, (course.time_left || 0) / (course.round_length || 1)));
+  $('course-seed').textContent = `лабиринт seed ${course.seed || 0} · длина хода ${(course.path_length || 0).toFixed(1)}`;
   $('strategy-value').textContent = agent.strategy; $('reward-value').textContent = `${Math.round(agent.reward * 100)}%`; $('novelty-value').textContent = `${Math.round(agent.novelty * 100)}%`; $('puff-value').textContent = `${agent.puff_count} (${data.metrics.total_puff_events})`; $('learning-value').textContent = String(data.metrics.learning_updates);
   renderActs(data);
   renderBrain(data);

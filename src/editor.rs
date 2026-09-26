@@ -244,6 +244,12 @@ pub struct RunnerSnapshot {
 /// The course, as the client needs it.
 #[derive(Debug, Clone, Serialize)]
 pub struct CourseSnapshot {
+    /// Which act this is, so the client can find the stage to put it on.
+    ///
+    /// All five acts are sent, not just the one being broadcast. They are all on
+    /// screen at once, and a maze on one stage and bare floor on the other four
+    /// reads as a bug rather than as a choice.
+    pub act: usize,
     /// Which round this is, counted from one.
     pub round: u32,
     /// The seed the maze was built from, so a round can be repeated.
@@ -442,6 +448,20 @@ pub struct ActSnapshot {
     pub weight: f32,
 }
 
+impl EditorSnapshot {
+    /// The course for the act currently being broadcast.
+    ///
+    /// The snapshot carries one course per act, because they are all on screen at
+    /// once, but the panel is about one of them and this says which.
+    pub fn shown_course(&self) -> &CourseSnapshot {
+        let act = self
+            .training
+            .current_act
+            .min(self.courses.len().saturating_sub(1));
+        &self.courses[act]
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct TrainingSnapshot {
     pub enabled: bool,
@@ -465,7 +485,8 @@ pub struct EditorSnapshot {
     pub decay: f32,
     pub selected_fly: Option<u32>,
     pub agents: Vec<AgentSnapshot>,
-    pub course: CourseSnapshot,
+    /// One course per act; they are all on screen at once.
+    pub courses: Vec<CourseSnapshot>,
     pub acts: Vec<ActSnapshot>,
     pub training: TrainingSnapshot,
     pub brain: Option<BrainSnapshot>,
@@ -2964,17 +2985,24 @@ impl EditorRuntime {
         true
     }
 
-    /// The course as the client needs it, for the act currently being broadcast.
+    /// The courses as the client needs them: one per act.
     ///
-    /// Stage-local, like the act's colliders, so the client places it on the stage
-    /// it already builds rather than having to know where the stages are.
-    fn course_snapshot(&self) -> CourseSnapshot {
-        let act_index = self.current_act.min(ACTS.len() - 1);
+    /// Stage-local, like the act's colliders, so the client places each on the
+    /// stage it already builds rather than having to know where the stages are.
+    fn course_snapshot(&self) -> Vec<CourseSnapshot> {
+        (0..ACTS.len()).map(|act| self.one_course(act)).collect()
+    }
+
+    fn one_course(&self, act_index: usize) -> CourseSnapshot {
+        let round = self.round;
+        let seed = self.round_seed;
+        let time_left = self.round_time;
         let Some(course) = self.courses.get(act_index) else {
             return CourseSnapshot {
-                round: self.round,
-                seed: self.round_seed,
-                time_left: self.round_time,
+                act: act_index,
+                round,
+                seed,
+                time_left,
                 round_length: ROUND_LENGTH,
                 food: [0.0, 0.0],
                 cell: 0.0,
@@ -2986,6 +3014,7 @@ impl EditorRuntime {
                 count: 0,
             };
         };
+        let [ax, ay] = ACTS[act_index].origin;
         let runners: Vec<RunnerSnapshot> = self
             .agents
             .iter()
@@ -2993,7 +3022,6 @@ impl EditorRuntime {
             .filter(|(index, _)| self.acts[*index].min(ACTS.len() - 1) == act_index)
             .map(|(index, agent)| {
                 // Stage-local, because the client draws on the stage.
-                let [ax, ay] = ACTS[act_index].origin;
                 let distance = (agent.position[0] - ax - course.goal[0])
                     .hypot(agent.position[1] - ay - course.goal[1]);
                 let worst = course
@@ -3006,17 +3034,18 @@ impl EditorRuntime {
                     distance,
                     progress: (1.0 - distance / worst).clamp(-1.0, 1.0),
                     score: self.scores[index],
-                    // A character who is out of the round has nothing left to
-                    // show, and a trail she no longer needs costs the client a
-                    // draw every frame.
+                    // A character who is out of the round has nothing left to show,
+                    // and a trail she no longer needs costs the client a draw every
+                    // frame.
                     trail: agent.trail.iter().map(|p| [p[0] - ax, p[1] - ay]).collect(),
                 }
             })
             .collect();
         CourseSnapshot {
-            round: self.round,
-            seed: self.round_seed,
-            time_left: self.round_time,
+            act: act_index,
+            round,
+            seed,
+            time_left,
             round_length: ROUND_LENGTH,
             food: course.goal,
             cell: course.cell,
@@ -3411,7 +3440,7 @@ impl EditorRuntime {
             decay: self.decay,
             selected_fly: self.selected,
             agents,
-            course: self.course_snapshot(),
+            courses: self.course_snapshot(),
             acts: self.act_snapshots(),
             training: TrainingSnapshot {
                 enabled: self.training,
@@ -4609,7 +4638,7 @@ mod tests {
         while elapsed < COURSE_BUDGET {
             runtime.step(FIXED_DT);
             elapsed += FIXED_DT;
-            if runtime.snapshot(60.0).course.fed > 0 {
+            if runtime.snapshot(60.0).shown_course().fed > 0 {
                 return Some(elapsed);
             }
         }
@@ -4628,7 +4657,7 @@ mod tests {
             seconds > 0.5,
             "the food was reached in {seconds:.2} s, which is not a search"
         );
-        let course = EditorRuntime::new(3).snapshot(60.0).course;
+        let course = EditorRuntime::new(3).snapshot(60.0).shown_course().clone();
         assert!(!course.walls.is_empty(), "the course drew no walls");
         assert!(course.path_length > 0.0, "the course has no route");
         assert!(course.count > 0, "nobody is on the course");
@@ -4649,10 +4678,35 @@ mod tests {
             while elapsed < COURSE_BUDGET && !ate {
                 runtime.step(FIXED_DT);
                 elapsed += FIXED_DT;
-                ate = runtime.snapshot(60.0).course.runners[0].fed;
+                ate = runtime.snapshot(60.0).shown_course().runners[0].fed;
             }
             assert!(ate, "seed {seed}: she never found the food");
         }
+    }
+
+    #[test]
+    fn every_act_has_a_course_of_its_own() {
+        // All five stages are on screen at once, so all five need a maze. A maze
+        // on one and bare floor on the other four reads as a bug, not as a choice.
+        // And they must differ: a troupe spread across the circus that is all
+        // solving the same puzzle is not spread across anything.
+        let state = EditorRuntime::new(3).snapshot(60.0);
+        assert_eq!(state.courses.len(), ACTS.len());
+        for (index, course) in state.courses.iter().enumerate() {
+            assert_eq!(course.act, index, "a course is filed under the wrong act");
+            assert!(
+                !course.walls.is_empty(),
+                "act {index} has no maze, so there is nothing to do there"
+            );
+            assert!(course.path_length > 0.0, "act {index} has no route");
+        }
+        let first = &state.courses[0].walls;
+        let all_differ = state
+            .courses
+            .iter()
+            .skip(1)
+            .all(|course| &course.walls != first);
+        assert!(all_differ, "two acts were handed the same maze");
     }
 
     #[test]
@@ -4661,11 +4715,11 @@ mod tests {
         // back, a character could learn it once and never look again, and the
         // thing on screen would be a rehearsal.
         let mut runtime = EditorRuntime::new(1);
-        let first = runtime.snapshot(60.0).course;
+        let first = runtime.snapshot(60.0).shown_course().clone();
         runtime
             .apply_command(br#"{"action":"course","value":987654}"#)
             .expect("course");
-        let second = runtime.snapshot(60.0).course;
+        let second = runtime.snapshot(60.0).shown_course().clone();
         assert_ne!(first.walls.len(), 0);
         assert_ne!(
             first.walls, second.walls,
@@ -4676,7 +4730,7 @@ mod tests {
     #[test]
     fn everyone_starts_at_the_entrance_and_nobody_starts_inside_a_wall() {
         let runtime = EditorRuntime::new(3);
-        let course = runtime.snapshot(60.0).course;
+        let course = runtime.snapshot(60.0).shown_course().clone();
         assert_eq!(course.count, 3);
         // The food has to be a walk away, not a stride. The route is the honest
         // measure and it is what the panel shows.
@@ -4732,7 +4786,7 @@ mod tests {
             if before.is_none() {
                 before = Some(runtime.snapshot(60.0).agents[0].reward);
             }
-            if runtime.snapshot(60.0).course.runners[0].fed {
+            if runtime.snapshot(60.0).shown_course().runners[0].fed {
                 rewarded = true;
                 break;
             }
@@ -4745,11 +4799,11 @@ mod tests {
     #[test]
     fn a_round_ends_and_the_next_one_is_a_new_problem() {
         let mut runtime = EditorRuntime::new(2);
-        let first = runtime.snapshot(60.0).course.round;
+        let first = runtime.snapshot(60.0).shown_course().round;
         // Force the round out rather than waiting out the clock.
         runtime.round_time = 0.001;
         runtime.step(FIXED_DT);
-        let after = runtime.snapshot(60.0).course;
+        let after = runtime.snapshot(60.0).shown_course().clone();
         assert!(after.round > first, "the round did not advance");
         assert!(after.time_left > 1.0, "the next round started with no time");
         assert!(
