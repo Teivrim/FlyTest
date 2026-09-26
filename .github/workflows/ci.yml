@@ -45,12 +45,20 @@ jobs:
           echo "C:\mingw64\bin" >> $env:GITHUB_ENV
           g++ --version | head -1
 
+      # Готовые actions не берут хост в названии канала:
+      # «target tuple in channel name 'stable-x86_64-pc-windows-gnu'».
+      # Для rustup этот формат корректен, поэтому ставим напрямую.
       - name: Установить Rust под gnu-хост
-        uses: dtolnay/rust-toolchain@stable-x86_64-pc-windows-gnu
+        shell: pwsh
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update
+          rustup default stable-x86_64-pc-windows-gnu
+          rustup run stable-x86_64-pc-windows-gnu rustc --version
 
       - name: Сборка с C-ядром
         run: |
-          cargo build --release --verbose 2>&1 | tail -20
+          cargo build --release 2>&1 | tail -25
 
       - name: C-ядро действительно подключено
         shell: pwsh
