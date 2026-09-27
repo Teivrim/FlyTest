@@ -139,5 +139,61 @@
   <footer class="statusbar"><span><i class="status-light"></i><span id="status-text">Ожидание runtime…</span></span><span>fixed timestep 16.67 ms · max 8 agents</span><span id="model-label">model: lightweight-policy</span></footer>
   <script src="/three.min.js"></script>
   <script src="/app.js"></script>
+
+<!-- Выбор профиля. Первое, что видит сайт: кто сегодня играет. -->
+<div id="chooser" class="chooser">
+  <div class="chooser-card">
+    <h1>Цирк</h1>
+    <p class="chooser-lead">Выбери муху, или заведи новую.</p>
+    <div id="profile-list" class="profile-list"></div>
+    <div class="profile-new">
+      <input id="profile-name" type="text" maxlength="24" placeholder="имя новой мухи" autocomplete="off">
+      <button id="profile-new" class="button wide">Завести муху</button>
+    </div>
+    <p id="chooser-error" class="chooser-error"></p>
+  </div>
+</div>
+
+<!-- Жизнь: кто она, в какой главе, что умеет, и что происходит, пока она спит. -->
+<section id="life" class="panel life" hidden>
+  <h2>Жизнь</h2>
+  <div class="life-head">
+    <div>
+      <div id="life-name" class="life-name">—</div>
+      <div id="life-stage" class="life-stage">—</div>
+    </div>
+    <div class="life-buttons">
+      <button id="sleep-button" class="button">Уложить спать</button>
+      <button id="wake-button" class="button" hidden>Разбудить</button>
+      <button id="change-fly" class="button">Сменить</button>
+    </div>
+  </div>
+  <ol id="life-chapters" class="chapters"></ol>
+  <div class="life-quest">
+    <div id="life-quest-text">—</div>
+    <div class="meter"><span id="life-quest-bar"></span></div>
+  </div>
+  <div class="life-split">
+    <div>
+      <h3>Семья</h3>
+      <div id="life-family" class="family"></div>
+    </div>
+    <div>
+      <h3>Навыки</h3>
+      <div id="life-skills" class="skills"></div>
+    </div>
+  </div>
+  <div id="dream" class="dream" hidden>
+    <div class="dream-head">
+      <span id="dream-task">—</span>
+      <span id="dream-note" class="dream-note">—</span>
+    </div>
+    <pre id="dream-board" class="dream-board"></pre>
+    <div id="dream-senses" class="senses"></div>
+    <div class="meter"><span id="dream-bar"></span></div>
+  </div>
+  <h3>Сны</h3>
+  <div id="life-history" class="history"></div>
+</section>
 </body>
 </html>

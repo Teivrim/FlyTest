@@ -146,6 +146,14 @@ if ($cc) {
 # in the browser half of the project used to survive until someone opened the
 # page and watched nothing happen.
 Invoke-Check -Name "node --check app.js" -Command "node --check editor\app.js" -Log "gate-node.txt"
+
+# Parsing is not enough. A call to a function that was never declared is not a
+# syntax error: the file loads, the parse succeeds, and the throw happens on the
+# first frame inside a requestAnimationFrame callback where nothing reports it and
+# the page simply stops updating. That happened here once and a screenshot was the
+# only way to notice. So the panel code is evaluated against a real snapshot and
+# the HTML it produces is looked at.
+Invoke-Check -Name "client rendering" -Command "node scripts\check_client.js" -Log "gate-client.txt"
 Invoke-Check -Name "Russian text"        -Command "python scripts\check_russian.py"       -Log "gate-russian.txt"
 
 # The hundred megabytes. A hard requirement from the person who asked for this
@@ -154,8 +162,18 @@ $memoryOk = $true
 $memoryNote = "skipped"
 if (-not $SkipMemory) {
     $exe = Join-Path $root "target\release\flytest.exe"
+    # Always build, even when the binary is already there. It used to build only
+    # if the file was missing, which meant the memory check measured whatever was
+    # there from last time: an editor change would be gated on the memory of the
+    # build before it, and a fresh checkout with a stale binary would sail through
+    # on numbers that had nothing to do with the source in front of it. The
+    # editor serves its HTML, its script and its stylesheet from inside the
+    # executable, so a gate that does not rebuild is a gate that did not look at
+    # the change.
+    & cmd /c "cargo build --release > `"$out\gate-build.txt`" 2>&1"
     if (-not (Test-Path $exe)) {
-        & cmd /c "cargo build --release > `"$out\gate-build.txt`" 2>&1"
+        $memoryOk = $false
+        $memoryNote = "the release binary was not built"
     }
     Get-Process flytest -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 400
@@ -180,6 +198,13 @@ if (-not $SkipMemory) {
         if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
     }
 }
+$results.Add([pscustomobject]@{
+    Check   = "release build"
+    Result  = if (Test-Path (Join-Path $root "target\release\flytest.exe")) { "ok" } else { "FAIL" }
+    Seconds = "0.0"
+    Note    = "target\release\flytest.exe"
+})
+
 $results.Add([pscustomobject]@{
     Check   = "memory under 100 MB"
     Result  = if ($memoryOk) { "ok" } else { "FAIL" }

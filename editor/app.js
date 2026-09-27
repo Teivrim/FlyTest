@@ -269,6 +269,7 @@ function buildArena() {
   ];
   for (const act of fallback) if (!actStages.has(act.id)) buildActStage(act);
   if (state.data) syncActStages();
+  if (state.data) renderLife(state.data);
 
   // The starfield, pushed out past the districts.
   const points = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: '#8ea8ca', size: 0.035, transparent: true, opacity: 0.5 }));
@@ -1259,7 +1260,31 @@ function checkCoursesDrew(expected) {
   }
 }
 
-async function command(action, payload = {}) { await fetch('/api/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...payload }) }); await refresh(); }
+// Send a command, and say what went wrong.
+//
+// It used to return nothing, so a caller that checked the result was checking
+// `undefined` and treating every failure as a success. Creating a fly with a name
+// the server refuses — an empty one, or a very long one — failed silently, and the
+// chooser sat there doing nothing with no explanation.
+async function command(action, payload = {}) {
+  try {
+    const res = await fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action, ...payload }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || body.error) {
+      const why = body.error || ('сервер ответил ' + res.status);
+      await refresh();
+      return why;
+    }
+    await refresh();
+    return null;
+  } catch (error) {
+    return 'связь с рантаймом потеряна: ' + error.message;
+  }
+}
 async function refresh() {
   try {
     const response = await fetch('/api/state', { cache: 'no-store' }); if (!response.ok) throw new Error('state unavailable'); state.data = await response.json(); state.selected = state.data.selected_fly || (state.data.agents[0] && state.data.agents[0].id);
@@ -1270,6 +1295,190 @@ async function refresh() {
 }
 const INTENT_LABELS = { explore: 'разведка вокруг', approach_odor: 'подойти к источнику запаха', seek_light: 'идти к источнику света', avoid_contact: 'избегать опасного сближения', steer_toward_odor: 'вести к источнику запаха', break_contact: 'прервать контакт и уйти', climb: 'набрать высоту', maintain_course: 'удерживать курс' };
 function intentLabel(value) { return INTENT_LABELS[value] || value; }
+// ── The chooser and the life ────────────────────────────────────────────────
+//
+// The site opens here. `state.life` is null until a profile is chosen, and that
+// is a normal state rather than an error: it is the first thing anybody sees.
+//
+// The life panel is deliberately the first thing in the sidebar rather than
+// buried under the brain. Everything else in this editor is a readout of a model
+// running; this is the part somebody is supposed to care about.
+
+const CHOOSER_ID = 'chooser';
+
+async function refreshChooser() {
+  const list = $('profile-list');
+  if (!list) return;
+  let profiles = [];
+  try {
+    const res = await fetch('/api/profiles');
+    if (res.ok) profiles = await res.json();
+  } catch (error) {
+    // The chooser is the whole page here. If the list will not load, say so
+    // rather than showing an empty box the player reads as "no flies".
+    $('chooser-error').textContent = 'Не удалось загрузить список: ' + error.message;
+    return;
+  }
+  const sig = profiles.map((p) => `${p.id}:${p.sleeps}:${p.age | 0}`).join('|');
+  if (list.dataset.sig === sig) return;
+  list.dataset.sig = sig;
+  list.innerHTML = '';
+  if (!profiles.length) {
+    const empty = document.createElement('p');
+    empty.className = 'chooser-empty';
+    empty.textContent = 'Пока никого нет.';
+    list.appendChild(empty);
+    return;
+  }
+  for (const profile of profiles) {
+    const row = document.createElement('button');
+    row.className = 'profile-row';
+    row.innerHTML = `<span class="profile-name">${profile.name}</span>`
+      + `<span class="profile-chapter">глава ${profile.chapter} из 6 · ${profile.stage_name}</span>`
+      + `<span class="profile-doing">${profile.doing}</span>`
+      + `<span class="profile-skills">${profile.best_at.length
+          ? 'умеет: ' + profile.best_at.join(', ') : 'пока ничего не умеет'}</span>`
+      + `<span class="profile-age">${formatAge(profile.age)}</span>`;
+    row.addEventListener('click', async () => {
+      await command('profile_open', { profile: profile.id });
+      showLife();
+    });
+    list.appendChild(row);
+  }
+}
+
+function formatAge(seconds) {
+  const days = Math.floor(seconds / 120);
+  if (days < 1) return 'только что родилась';
+  return days + ' ' + plural(days, 'день', 'дня', 'дней') + ' жизни';
+}
+
+function plural(n, one, few, many) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return one;
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return few;
+  return many;
+}
+
+function showLife() {
+  const chooser = $(CHOOSER_ID);
+  const life = $('life');
+  if (!chooser || !life) return;
+  const open = !!state.data && !!state.data.life;
+  chooser.hidden = open;
+  life.hidden = !open;
+}
+
+function renderLife(data) {
+  const life = data.life;
+  if (!life) { showLife(); return; }
+  showLife();
+
+  $('life-name').textContent = life.name;
+  $('life-stage').textContent = `глава ${life.chapter} из 6 · ${life.stage} · ${formatAge(life.age)}`;
+
+  const road = $('life-chapters');
+  const sig = life.chapters.map((c) => c[1] ? '1' : '0').join('');
+  if (road.dataset.sig !== sig + life.stage) {
+    road.dataset.sig = sig + life.stage;
+    road.innerHTML = '';
+    for (const [name, done] of life.chapters) {
+      const li = document.createElement('li');
+      li.className = done ? 'done' : '';
+      li.textContent = name;
+      road.appendChild(li);
+    }
+  }
+
+  $('life-quest-text').textContent = `${life.quest} → ${life.quest_after}`;
+  $('life-quest-bar').style.width = Math.round((life.quest_progress || 0) * 100) + '%';
+
+  const family = $('life-family');
+  const familySig = life.family;
+  if (family.dataset.sig !== familySig) {
+    family.dataset.sig = familySig;
+    family.innerHTML = '';
+    for (const member of life.family_members) {
+      const row = document.createElement('div');
+      row.className = 'family-row';
+      row.innerHTML = `<b>${member.name}</b> <span>${member.role}</span>`
+        + `<span class="doing">${member.doing}</span>`;
+      family.appendChild(row);
+    }
+  }
+
+  const skills = $('life-skills');
+  const skillSig = life.skills.map((s) => `${s.key}:${s.level.toFixed(2)}:${s.best}`).join('|') + life.task;
+  if (skills.dataset.sig !== skillSig) {
+    skills.dataset.sig = skillSig;
+    skills.innerHTML = '';
+    for (const skill of life.skills) {
+      const row = document.createElement('div');
+      row.className = 'skill-row' + (skill.current ? ' current' : '');
+      const pct = Math.round(skill.level * 100);
+      row.innerHTML = `<span class="skill-name">${skill.name}</span>`
+        + `<span class="meter"><span style="width:${pct}%"></span></span>`
+        + `<span class="skill-level">${pct}%</span>`;
+      row.title = skill.about + (skill.best ? ' · лучший результат: ' + skill.best : '');
+      skills.appendChild(row);
+    }
+  }
+
+  const history = $('life-history');
+  const histSig = life.history.map((h) => h.task + h.score + h.turns).join('|');
+  if (history.dataset.sig !== histSig) {
+    history.dataset.sig = histSig;
+    history.innerHTML = '';
+    if (!life.history.length) {
+      const empty = document.createElement('div');
+      empty.className = 'history-row';
+      empty.textContent = 'Она ещё не спала.';
+      history.appendChild(empty);
+    }
+    for (const record of life.history) {
+      const row = document.createElement('div');
+      row.className = 'history-row' + (record.solved ? ' solved' : '');
+      row.innerHTML = `<b>${record.task}</b>`
+        + `<span>ходов ${record.turns}, удалось ${record.good_turns}</span>`
+        + `<span>очки ${record.score}</span>`
+        + `<span>${record.solved ? 'решила' : 'не решила'}</span>`
+        + `<span>навык ${Math.round(record.level * 100)}%</span>`;
+      history.appendChild(row);
+    }
+  }
+
+  $('sleep-button').hidden = life.asleep;
+  $('wake-button').hidden = !life.asleep;
+
+  const dream = $('dream');
+  dream.hidden = !life.dream;
+  if (life.dream) {
+    const d = life.dream;
+    $('dream-task').textContent = `сон: ${d.task} · ${d.about} · попытка ${d.attempt}`;
+    $('dream-note').textContent = d.describe;
+    $('dream-board').textContent = (d.board || []).map((row) => {
+      return Array.from(row).map((ch) => {
+        if (ch === 32) return '\u00a0';
+        if (ch === 35) return '\u2593';
+        if (ch === 64) return '\u25c9';
+        if (ch === 46) return '\u00b7';
+        if (ch === 44) return '\u2591';
+        return String.fromCharCode(ch);
+      }).join('');
+    }).join('\n');
+    if (d.answer) {
+      $('dream-note').textContent += ' — верный ответ: ' + d.answer.join(' ');
+    }
+    const names = ['свет', 'запах', 'осязание', 'тепло'];
+    $('dream-senses').innerHTML = d.senses.map((value, i) => {
+      const pct = Math.round(Math.max(0, Math.min(1, value)) * 100);
+      return `<span>${names[i]} ${pct}%</span>`;
+    }).join('');
+    $('dream-bar').style.width = Math.round((d.progress || 0) * 100) + '%';
+  }
+}
+
 function renderPanels() {
   const data = state.data; if (!data) return;
   $('fps').textContent = `${Math.round(data.metrics.fps)} FPS`; $('tick').textContent = `tick ${data.tick}`; $('sim-time').textContent = `t = ${data.metrics.sim_time.toFixed(2)} s`; $('model-label').textContent = 'model: lightweight-policy'; $('pause').textContent = data.running ? 'Пауза' : 'Продолжить';
@@ -1873,4 +2082,26 @@ $('log-toggle').addEventListener('click', () => {
 });
 $('reward-button').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('reward', { id: agent.id }); });
 $('puff-button').addEventListener('click', () => { const agent = state.data && state.data.agents.find((item) => item.id === state.selected); if (agent) command('puff', { id: agent.id }); });
-init3D(); refresh(); setInterval(refresh, 100); requestAnimationFrame(render3D); window.addEventListener('resize', resizeCanvas);
+// The chooser first: it is the page before anybody has chosen anything, and the
+// state poll only makes sense once there is a life to report on. Every hundred
+// milliseconds is also far too often to ask "who exists", and the profiles route
+// exists precisely so that this does not have to be.
+refreshChooser();
+$('profile-new').addEventListener('click', async () => {
+  const name = $('profile-name').value.trim();
+  const error = await command('profile_new', { name });
+  if (error) { $('chooser-error').textContent = error; return; }
+  $('chooser-error').textContent = '';
+  $('profile-name').value = '';
+  showLife();
+});
+$('sleep-button').addEventListener('click', () => command('sleep'));
+$('wake-button').addEventListener('click', () => command('sleep', { value: 0 }));
+$('change-fly').addEventListener('click', () => {
+  showLife();
+  $('chooser').hidden = false;
+  $('life').hidden = true;
+  refreshChooser();
+});
+
+init3D(); refresh(); setInterval(refresh, 100); setInterval(refreshChooser, 4000); requestAnimationFrame(render3D); window.addEventListener('resize', resizeCanvas);

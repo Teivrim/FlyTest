@@ -240,3 +240,127 @@ input[type=range] { width: 100%; margin: 10px 0 0; accent-color: var(--cyan); }
 
 /* The auto switch, lit while the troupe is moving itself on. */
 .action-row .button.on { border-color: var(--orange); color: #ffe4bd; background: rgba(255,184,107,.14); }
+
+
+/* ── Выбор профиля ───────────────────────────────────────────────────────
+   The site opens here, so this is a full screen rather than a panel: a fly is
+   being chosen, not a readout being glanced at. */
+
+.chooser {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: radial-gradient(circle at 50% 30%, #1b1030 0%, #07090f 70%);
+}
+.chooser[hidden] { display: none; }
+.chooser-card {
+  width: min(560px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: 28px;
+  border: 1px solid #2c3d59;
+  border-radius: 14px;
+  background: rgba(12, 16, 26, .92);
+  box-shadow: 0 30px 90px rgba(0, 0, 0, .6);
+}
+.chooser-card h1 { margin: 0 0 4px; font-size: 30px; letter-spacing: .04em; }
+.chooser-lead { margin: 0 0 18px; color: #8ea8ca; }
+.chooser-empty, .chooser-error { color: #8ea8ca; }
+.chooser-error { color: #ff8fa3; min-height: 1.2em; margin: 8px 0 0; }
+
+.profile-list { display: grid; gap: 8px; margin-bottom: 18px; }
+.profile-row {
+  display: grid;
+  gap: 2px;
+  padding: 12px 14px;
+  text-align: left;
+  border: 1px solid #2c3d59;
+  border-radius: 10px;
+  background: rgba(20, 28, 44, .8);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.profile-row:hover { border-color: var(--orange); background: rgba(255, 184, 107, .08); }
+.profile-name { font-size: 18px; font-weight: 600; }
+.profile-chapter { font-size: 12px; color: var(--orange); }
+.profile-doing, .profile-skills, .profile-age { font-size: 12px; color: #8ea8ca; }
+
+.profile-new { display: grid; gap: 8px; }
+.profile-new input {
+  padding: 11px 12px;
+  border: 1px solid #2c3d59;
+  border-radius: 9px;
+  background: #0d1522;
+  color: inherit;
+  font: inherit;
+}
+
+/* ── Жизнь ───────────────────────────────────────────────────────────────
+   The first panel in the sidebar, above the readouts: everything else here is
+   a picture of a model running and this is the part somebody is meant to care
+   about. */
+
+.life[hidden] { display: none; }
+.life-head { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.life-name { font-size: 20px; font-weight: 600; }
+.life-stage { font-size: 12px; color: #8ea8ca; }
+.life-buttons { display: flex; gap: 6px; }
+
+.chapters { display: flex; flex-wrap: wrap; gap: 5px; list-style: none; margin: 12px 0; padding: 0; }
+.chapters li {
+  padding: 3px 9px;
+  font-size: 12px;
+  border: 1px solid #2c3d59;
+  border-radius: 999px;
+  color: #6d829c;
+}
+.chapters li.done { border-color: var(--orange); color: #ffe4bd; background: rgba(255, 184, 107, .12); }
+
+.life-quest { display: grid; gap: 5px; margin-bottom: 12px; font-size: 13px; }
+.life-split { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.life-split h3, .life > h3 { margin: 14px 0 6px; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: #6d829c; }
+
+.family-row, .skill-row, .history-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(44, 61, 89, .5);
+}
+.family-row .doing, .history-row span { color: #8ea8ca; }
+.skill-row.current { color: var(--orange); }
+.skill-name { min-width: 78px; }
+.skill-level { min-width: 34px; text-align: right; }
+.history-row.solved b { color: #8ce06a; }
+
+.meter { display: block; flex: 1; height: 5px; border-radius: 3px; background: rgba(44, 61, 89, .6); overflow: hidden; }
+.meter > span { display: block; height: 100%; background: linear-gradient(90deg, #54d7e8, #ff5c7a); }
+
+/* ── Сон ────────────────────────────────────────────────────────────────
+   The board, because a sleep is the one thing in this project that is worth
+   watching happen rather than reading about. */
+
+.dream { margin: 12px 0; padding: 10px; border: 1px solid #a98bff; border-radius: 10px; background: rgba(41, 30, 72, .5); }
+.dream[hidden] { display: none; }
+.dream-head { display: flex; justify-content: space-between; gap: 8px; font-size: 13px; }
+.dream-note { color: #8ea8ca; }
+.dream-board {
+  margin: 8px 0;
+  padding: 8px;
+  min-height: 84px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 15px;
+  line-height: 1.25;
+  color: #cfe0ff;
+  background: #080b14;
+  border-radius: 8px;
+  white-space: pre;
+  overflow-x: auto;
+}
+.senses { display: flex; gap: 10px; font-size: 11px; color: #8ea8ca; margin-bottom: 6px; }
