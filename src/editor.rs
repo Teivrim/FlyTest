@@ -14,7 +14,10 @@ pub const DEFAULT_PORT: u16 = 8765;
 pub const DEFAULT_FLIES: usize = 3;
 const MAX_FLIES: usize = 8;
 const SERVER_FPS: f32 = 60.0;
-const FIXED_DT: f32 = 1.0 / SERVER_FPS;
+/// One simulation step. Public because the life module advances a sleep by it,
+/// and a sleep has to last the same number of seconds as a world tick or the
+/// two would drift apart.
+pub const FIXED_DT: f32 = 1.0 / SERVER_FPS;
 
 const INDEX_HTML: &str = include_str!("../editor/index.html");
 const THREE_JS: &str = include_str!("../editor/three.min.js");
