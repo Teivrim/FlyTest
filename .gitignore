@@ -8,5 +8,9 @@
 __pycache__/
 *.py[cod]
 runtime-output/
+# A player's saved flies. These are saves, not source: the one that got
+# committed by accident was written by a test run and belongs to a fly that
+# never existed.
+profiles/
 *.blend1
 *.blend2
