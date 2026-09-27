@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::life::{Life, Member};
+use crate::profile::{Profile, ProfileStore, ProfileSummary, Stage, Task};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
@@ -511,6 +513,113 @@ pub struct EditorSnapshot {
     pub brain: Option<BrainSnapshot>,
     pub metrics: EditorMetrics,
     pub model_note: String,
+    /// The fly whose life is being played, and every fly on disk.
+    ///
+    /// `None` means nobody is chosen yet and the site shows the list. That is a
+    /// real state and not an error: the site opens on it.
+    pub life: Option<LifeSnapshot>,
+    /// Every saved fly, newest life first, for the chooser.
+    pub profiles: Vec<ProfileSummary>,
+}
+
+/// The life, flattened for the site.
+#[derive(Debug, Clone, Serialize)]
+pub struct LifeSnapshot {
+    /// Her name, in Russian, as the player typed it.
+    pub name: String,
+    /// The file id, for selecting her again.
+    pub id: String,
+    /// Simulated seconds lived.
+    pub age: f32,
+    /// The chapter name, in Russian.
+    pub stage: &'static str,
+    /// The chapter number, one-based, out of six.
+    pub chapter: u8,
+    /// All six chapter names in order, so the site can draw the whole road.
+    pub chapters: Vec<(&'static str, bool)>,
+    /// What she is doing about it, in Russian.
+    pub quest: String,
+    /// 0..1 through the quest.
+    pub quest_progress: f32,
+    /// What she will be doing when it is done.
+    pub quest_after: String,
+    /// The household, one line in Russian.
+    pub family: String,
+    /// Each member, for the panel.
+    pub family_members: Vec<MemberSnapshot>,
+    /// Where the house is, so the site can say which way is home.
+    pub home: [f32; 3],
+    /// Whether she is asleep.
+    pub asleep: bool,
+    /// The sleep, when she is in one.
+    pub dream: Option<DreamSnapshot>,
+    /// How she walks, 0..1.
+    pub gait: f32,
+    /// One entry per task: the Russian name, the level, and the best run.
+    pub skills: Vec<SkillView>,
+    /// The finished sleeps, newest first, for the list under the panel.
+    pub history: Vec<SleepView>,
+    /// The last chapter change, in Russian, or nothing.
+    pub last_change: Option<String>,
+}
+
+/// One person in the household.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemberSnapshot {
+    pub name: &'static str,
+    pub role: &'static str,
+    pub doing: &'static str,
+}
+
+/// The sleep, while it is happening.
+#[derive(Debug, Clone, Serialize)]
+pub struct DreamSnapshot {
+    /// The task's Russian name.
+    pub task: &'static str,
+    /// The one-line description of the task, in Russian.
+    pub about: &'static str,
+    /// How far into the task she is.
+    pub progress: f32,
+    /// What she has scored.
+    pub score: u32,
+    /// The best she has scored in it.
+    pub best: u32,
+    /// Which attempt this is, from one.
+    pub attempt: u32,
+    /// Turns taken and turns she got something from.
+    pub turns: u32,
+    pub good_turns: u32,
+    /// What she has earned this sleep, in Russian.
+    pub describe: String,
+    /// The four senses, which is all she has and all she is given.
+    pub senses: [f32; 4],
+    /// The board, as rows of bytes, for the site to draw.
+    pub board: Vec<Vec<u8>>,
+    /// The answer, for the code task only: shown after the sleep, never during.
+    pub answer: Option<Vec<&'static str>>,
+}
+
+/// One task and how good she is at it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SkillView {
+    pub key: &'static str,
+    pub name: &'static str,
+    pub about: &'static str,
+    pub level: f32,
+    pub best: u32,
+    /// Whether this is the chapter's current task, so the panel can point at it.
+    pub current: bool,
+}
+
+/// One finished sleep.
+#[derive(Debug, Clone, Serialize)]
+pub struct SleepView {
+    pub task: &'static str,
+    pub turns: u32,
+    pub good_turns: u32,
+    pub score: u32,
+    pub solved: bool,
+    pub level: f32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -520,6 +629,9 @@ struct Command {
     value: Option<f32>,
     name: Option<String>,
     enabled: Option<bool>,
+    /// A profile id, for opening or deleting a saved fly.
+    #[serde(default)]
+    profile: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1962,6 +2074,14 @@ pub struct EditorRuntime {
     /// Optional JSONL sink, so a session can be analysed after the fact.
     log_file: Option<std::fs::File>,
     log_path: Option<std::path::PathBuf>,
+    /// The saved flies, and the one being played.
+    ///
+    /// Optional, and `None` is a normal state: the site opens on the chooser and
+    /// nobody has been picked yet. A store that must exist before the editor can
+    /// start would put a directory on disk as a side effect of running the editor
+    /// at all.
+    store: Option<ProfileStore>,
+    life: Option<Life>,
     /// Who each fly last met, for the readout.
     partners: Vec<Option<u32>>,
     /// Cadence of the social layer, independent of the training timer.
@@ -2287,6 +2407,8 @@ impl EditorRuntime {
             log_path: None,
             partners: vec![None; count],
             encounter_timer: 0.0,
+            store: None,
+            life: None,
         }
         // The courses are built here rather than lazily on first use, so the very
         // first frame already has a maze under everyone's feet. `new` cannot call
@@ -2702,6 +2824,22 @@ impl EditorRuntime {
         // rig on the next frame.
         brain.fly.set_gait(brain.fly.preferred_gait());
         score
+    }
+
+    /// How well the fly whose life is being played walks.
+    ///
+    /// Taken from the C core's own gait weights rather than kept as a separate
+    /// number, because a second number would be a second truth: the life would
+    /// open its "первые шаги" chapter on a scale the body knows nothing about,
+    /// and a fly would be able to pass it while visibly falling over. What is
+    /// measured is how much weight she has on the gait she actually prefers.
+    fn profile_gait_level(&self) -> f32 {
+        let brain = match self.brains.first() {
+            Some(brain) => brain,
+            None => return 0.0,
+        };
+        let preferred = brain.fly.preferred_gait();
+        (brain.fly.gait_weight(preferred).abs() * 2.0).clamp(0.0, 1.0)
     }
 
     /// Mean mastery across every fly, from the weight each has on the act it is
@@ -3430,6 +3568,35 @@ impl EditorRuntime {
         // actually ended up rather than where she was aiming.
         self.feed_ground_speed(&before);
 
+        // The life, ticked once per frame alongside the world.
+        //
+        // The first version of the life module was complete, tested, and did
+        // nothing at all on screen, because nothing called it: the profile could
+        // be created, the family could be listed, the fly could be put to sleep,
+        // and the sleep would sit at turn zero for ever. Six API calls had proved
+        // the pieces fit together and none of them had proved the machine turns.
+        //
+        // The first fly is the one whose life is being played, and the world's
+        // own food count is what the foraging chapter is measured against, so the
+        // life is driven from the world rather than running beside it.
+        if self.life.is_some() {
+            let position = self.agents.first().map(|a| a.position).unwrap_or([0.0; 3]);
+            let ate = self.agents.first().map(|a| a.ate_count).unwrap_or(0);
+            let gait_level = self.profile_gait_level();
+            let epsilon = self.epsilon;
+            let life = self.life.as_mut().expect("checked just above");
+            if let Some(brain) = self.brains.first_mut() {
+                life.profile.gait.level = gait_level;
+                life.tick(&mut brain.fly, dt * self.speed, position, ate, epsilon);
+            }
+            // A sleep that ended, or a chapter that changed, is worth writing
+            // down. Once, not every frame: the flag is taken, so a save costs one
+            // file write per event rather than sixty per second.
+            if life.take_dirty() {
+                self.persist_life();
+            }
+        }
+
         // The round ends when everyone has eaten or when the clock runs out,
         // whichever comes first, and a new maze is built under their feet. That
         // is the point of rebuilding: a route worked out in the last round is
@@ -3590,6 +3757,8 @@ impl EditorRuntime {
             agents,
             courses: self.course_snapshot(),
             auto: self.auto,
+            life: self.life_snapshot(),
+            profiles: self.profile_list(),
             acts: self.act_snapshots(),
             training: TrainingSnapshot {
                 enabled: self.training,
@@ -3622,6 +3791,269 @@ impl EditorRuntime {
                 self.current().lesson
             ),
         }
+    }
+
+    /// The directory the profiles live in, relative to where the editor runs.
+    ///
+    /// Not the system temp directory: a saved fly that vanishes when the machine
+    /// reboots is not a saved fly.
+    fn profile_root() -> std::path::PathBuf {
+        std::path::PathBuf::from("profiles")
+    }
+
+    /// The store, created on first use.
+    ///
+    /// Created lazily so that running the editor at all does not leave a
+    /// directory behind. A player who never opens the chooser never gets one.
+    fn store(&mut self) -> Result<&mut ProfileStore, String> {
+        if self.store.is_none() {
+            let store = ProfileStore::new(Self::profile_root())
+                .map_err(|error| format!("не удалось открыть папку профилей: {error}"))?;
+            self.store = Some(store);
+        }
+        Ok(self.store.as_mut().expect("store was just created"))
+    }
+
+    /// Every saved fly, newest life first.
+    fn profile_list(&self) -> Vec<ProfileSummary> {
+        match self.store.as_ref() {
+            Some(store) => store.list().iter().map(ProfileSummary::of).collect(),
+            // No directory yet means no flies yet, which is the first run and not
+            // a failure. The site shows an empty chooser and an offer to make one.
+            None => Vec::new(),
+        }
+    }
+
+    /// Make a new fly and start playing her.
+    ///
+    /// She is born rather than added: a newborn in swaddling, in a house in the
+    /// village, in chapter one. Creating a profile is not spawning another
+    /// character on a stage, it is the beginning of a life.
+    fn new_profile(&mut self, name: &str) -> Result<String, String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("имя не может быть пустым".to_owned());
+        }
+        // A cap, because the name goes on screen as a label and into a file, and
+        // neither has any business holding a paragraph.
+        if name.chars().count() > 24 {
+            return Err("слишком длинное имя, не больше 24 букв".to_owned());
+        }
+        let id = self.store()?.make_id(name);
+        let profile = Profile::newborn(&id, name);
+        self.save_profile(&profile)?;
+        self.begin_life(profile);
+        Ok(id)
+    }
+
+    /// Write a profile out. The one place a save happens.
+    fn save_profile(&mut self, profile: &Profile) -> Result<(), String> {
+        let mut copy = profile.clone();
+        copy.saved_at = self.time;
+        self.store()?
+            .save(&copy)
+            .map_err(|error| format!("не удалось сохранить профиль: {error}"))
+    }
+
+    /// Put a life into play, and bring the troupe's first fly into line with it.
+    ///
+    /// The other two flies stay where they are. A profile is one fly's life, and
+    /// the troupe is a training rig she is measured against, not a family she
+    /// belongs to.
+    fn begin_life(&mut self, profile: Profile) {
+        let position = profile.position;
+        let life = Life::new(profile);
+        self.life = Some(life);
+        if !self.agents.is_empty() {
+            self.agents[0].position = position;
+            self.agents[0].velocity = [0.0, 0.0, 0.0];
+        }
+        if self.selected.is_none() {
+            self.selected = self.agents.first().map(|agent| agent.id);
+        }
+    }
+
+    /// Open a saved fly.
+    fn open_profile(&mut self, id: &str) -> Result<(), String> {
+        let profile = self
+            .store()?
+            .load(id)
+            .ok_or_else(|| format!("профиля «{id}» нет на диске"))?;
+        let name = profile.name.clone();
+        self.begin_life(profile);
+        self.log(LogEntry {
+            t: self.time,
+            fly: 0,
+            kind: "profile".to_owned(),
+            text: format!("открыт профиль {name}"),
+        });
+        Ok(())
+    }
+
+    /// Delete a saved fly. The one on disk goes too, not just out of the session.
+    fn delete_profile(&mut self, id: &str) -> Result<(), String> {
+        self.store()?
+            .remove(id)
+            .map_err(|error| format!("не удалось удалить профиль: {error}"))?;
+        Ok(())
+    }
+
+    /// Put her to sleep, in the task her chapter is about.
+    fn sleep_now(&mut self) -> Result<(), String> {
+        let seed = (self.tick as u32).wrapping_mul(2654435761);
+        let life = self
+            .life
+            .as_mut()
+            .ok_or_else(|| "сначала выбери профиль".to_owned())?;
+        let task = life.task;
+        let name = life.profile.name.clone();
+        let brain = self
+            .brains
+            .first_mut()
+            .ok_or_else(|| "нет ни одной мухи".to_owned())?;
+        life.sleep(&mut brain.fly, seed);
+        self.log(LogEntry {
+            t: self.time,
+            fly: 0,
+            kind: "sleep".to_owned(),
+            text: format!("{name} заснула, сон: {}", task.name()),
+        });
+        Ok(())
+    }
+
+    /// Wake her up, whether or not the sleep is finished.
+    fn wake_now(&mut self) -> Result<(), String> {
+        let task = self
+            .life
+            .as_ref()
+            .and_then(|life| life.dream.as_ref().map(|dream| dream.task()))
+            .ok_or_else(|| "она и так не спит".to_owned())?;
+        let brain = self
+            .brains
+            .first_mut()
+            .ok_or_else(|| "нет ни одной мухи".to_owned())?;
+        if let Some(life) = self.life.as_mut() {
+            life.wake(&mut brain.fly, task);
+            life.dirty = false;
+        }
+        // A sleep is worth a save. It is the one moment in a life worth writing
+        // down, and the one moment where writing it down is cheap.
+        self.persist_life();
+        self.log(LogEntry {
+            t: self.time,
+            fly: 0,
+            kind: "wake".to_owned(),
+            text: "проснулась".to_owned(),
+        });
+        Ok(())
+    }
+
+    /// Write the life out, if there is one.
+    fn persist_life(&mut self) {
+        let profile = self.life.as_ref().map(|life| life.profile.clone());
+        if let Some(profile) = profile {
+            let _ = self.save_profile(&profile);
+        }
+    }
+
+    /// The life, as the site sees it.
+    fn life_snapshot(&self) -> Option<LifeSnapshot> {
+        let life = self.life.as_ref()?;
+        let profile = &life.profile;
+        let task = life.task;
+        let chapters: Vec<(&'static str, bool)> = Stage::ALL
+            .iter()
+            .map(|stage| (stage.name(), *stage <= profile.stage))
+            .collect();
+        let family_members: Vec<MemberSnapshot> = life
+            .family
+            .members
+            .iter()
+            .map(|member: &Member| MemberSnapshot {
+                name: member.name,
+                role: member.role,
+                doing: member.doing,
+            })
+            .collect();
+        let dream = life.dream.as_ref().map(|dream| {
+            let senses = dream.episode.observe();
+            let opcodes = [
+                "стоп",
+                "иди",
+                "поверни",
+                "считай",
+                "сравни",
+                "прыгни",
+                "пометь",
+            ];
+            DreamSnapshot {
+                task: dream.task().name(),
+                about: dream.task().about(),
+                progress: dream.episode.progress(),
+                score: dream.episode.score(),
+                best: dream.episode.best(),
+                attempt: dream.episode.attempt(),
+                turns: dream.turns,
+                good_turns: dream.good_turns,
+                describe: dream.describe(),
+                senses: [senses.light, senses.odor, senses.touch, senses.temperature],
+                board: dream.episode.board(),
+                answer: dream.episode.answer().map(|program| {
+                    program
+                        .into_iter()
+                        .map(|opcode| opcodes[(opcode as usize).min(6)])
+                        .collect()
+                }),
+            }
+        });
+        let skills: Vec<SkillView> = Task::ALL
+            .iter()
+            .map(|skill_task| {
+                let skill = profile.skill(*skill_task);
+                SkillView {
+                    key: skill_task.key(),
+                    name: skill_task.name(),
+                    about: skill_task.about(),
+                    level: skill.level,
+                    best: skill.best,
+                    current: *skill_task == task,
+                }
+            })
+            .collect();
+        let history: Vec<SleepView> = life
+            .history
+            .iter()
+            .rev()
+            .take(8)
+            .map(|record| SleepView {
+                task: record.task.name(),
+                turns: record.turns,
+                good_turns: record.good_turns,
+                score: record.score,
+                solved: record.solved,
+                level: record.level,
+            })
+            .collect();
+        Some(LifeSnapshot {
+            name: profile.name.clone(),
+            id: profile.id.clone(),
+            age: profile.age,
+            stage: profile.stage.name(),
+            chapter: profile.stage.chapter(),
+            chapters,
+            quest: life.quest.text.to_owned(),
+            quest_progress: life.quest.progress,
+            quest_after: life.quest.after.to_owned(),
+            family: life.family.summary(),
+            family_members,
+            home: life.family.home,
+            asleep: life.is_asleep(),
+            dream,
+            gait: profile.gait.level,
+            skills,
+            history,
+            last_change: life.last_change.clone(),
+        })
     }
 
     pub fn apply_command(&mut self, body: &[u8]) -> Result<String> {
@@ -3673,6 +4105,23 @@ impl EditorRuntime {
             // Whether the troupe moves on by itself. A round is enough of a cadence
             // for it, and using the round means they change place when they have
             // finished something rather than at an arbitrary moment.
+            // The chooser and the sleep. Four commands, all of which only do
+            // anything once a profile exists, because a fly with no life cannot
+            // be put to sleep.
+            "profile_new" => {
+                let name = command.name.unwrap_or_default();
+                self.new_profile(&name).map_err(anyhow::Error::msg)?;
+            }
+            "profile_open" => {
+                let id = command.profile.clone().or(command.name.clone());
+                let id = id.context("profile_open requires a profile")?;
+                self.open_profile(&id).map_err(anyhow::Error::msg)?;
+            }
+            "profile_delete" => {
+                let id = command.profile.clone().or(command.name.clone());
+                let id = id.context("profile_delete requires a profile")?;
+                self.delete_profile(&id).map_err(anyhow::Error::msg)?;
+            }
             "auto" => {
                 self.auto = command.enabled.unwrap_or(!self.auto);
                 let on = self.auto;
@@ -3972,24 +4421,51 @@ impl EditorRuntime {
             // thing the face does and there was no other way to see it: she
             // only ever fell asleep on her own once her energy ran out, which
             // took minutes of simulated time.
+            //
+            // One sleep, not two. The first version of the life added its own
+            // `sleep` arm at the top of this dispatcher, and there was already a
+            // `sleep` further down for the C core, so the second one was
+            // unreachable and rustc said so: `sleep requires id` had been quietly
+            // replaced by a version that quietly ignored the id.
+            //
+            // With an id it is the old command and puts one fly to sleep. With no
+            // id, and a life open, it is the new one and the sleep is a training
+            // session. Both write to the same log entry, because a player should
+            // not have to know which of the two they just triggered.
             "sleep" => {
-                let id = command.id.context("sleep requires id")?;
-                if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
-                    if command.value.map(|v| v > 0.5).unwrap_or(true) {
-                        self.brains[index].fly.sleep();
-                    } else {
-                        self.brains[index].fly.wake();
+                let asleep = command.value.map(|v| v > 0.5).unwrap_or(true);
+                match command.id {
+                    Some(id) => {
+                        if let Some(index) = self.agents.iter().position(|agent| agent.id == id) {
+                            if asleep {
+                                self.brains[index].fly.sleep();
+                            } else {
+                                self.brains[index].fly.wake();
+                            }
+                            self.log(LogEntry {
+                                t: 0.0,
+                                fly: id,
+                                kind: "sleep".to_owned(),
+                                text: if self.brains[index].fly.is_asleep() {
+                                    "уснула".to_owned()
+                                } else {
+                                    "проснулась".to_owned()
+                                },
+                            });
+                        }
                     }
-                    self.log(LogEntry {
-                        t: 0.0,
-                        fly: id,
-                        kind: "sleep".to_owned(),
-                        text: if self.brains[index].fly.is_asleep() {
-                            "уснула".to_owned()
+                    None if self.life.is_some() => {
+                        if asleep {
+                            self.sleep_now().map_err(anyhow::Error::msg)?;
                         } else {
-                            "проснулась".to_owned()
-                        },
-                    });
+                            self.wake_now().map_err(anyhow::Error::msg)?;
+                        }
+                    }
+                    None => {
+                        return Err(anyhow::anyhow!(
+                            "сону нужен профиль, либо укажи, кого усыпить"
+                        ));
+                    }
                 }
             }
             // Startle a character, which is the fastest way to watch the eyes
@@ -4154,6 +4630,25 @@ fn serve_client(stream: TcpStream, runtime: &Arc<Mutex<EditorRuntime>>, fps: f32
             response("200 OK", "text/javascript; charset=utf-8", APP_JS)
         } else if method == "GET" && path == "/style.css" {
             response("200 OK", "text/css; charset=utf-8", STYLE_CSS)
+        } else if method == "GET" && path == "/api/profiles" {
+            // The chooser, without the rest of the state.
+            //
+            // A separate route because the chooser is the first thing the site
+            // shows and it is the only thing it needs. Polling the whole world
+            // once a second to list six flies is the wrong shape for a page that
+            // is mostly static.
+            let list = runtime
+                .lock()
+                .expect("editor runtime lock poisoned")
+                .profile_list();
+            match serde_json::to_string(&list) {
+                Ok(value) => response("200 OK", "application/json; charset=utf-8", &value),
+                Err(error) => response(
+                    "500 Internal Server Error",
+                    "application/json",
+                    &error.to_string(),
+                ),
+            }
         } else if method == "GET" && path == "/api/state" {
             let snapshot = runtime
                 .lock()

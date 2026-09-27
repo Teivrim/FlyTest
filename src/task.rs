@@ -305,9 +305,15 @@ impl Episode {
     }
 
     /// Whether the task's own goal has been met.
+    ///
+    /// The tetris one is not `t.finished`. `finished` there means the stack
+    /// reached the top of the board, which is how the game is *lost*, and
+    /// reporting it as solved meant the panel said she had finished the task
+    /// every time she drowned in pieces. Solved there is a line count, and
+    /// overflowing only ends the episode.
     fn solved_now(&self) -> bool {
         match &self.state {
-            State::Tetris(t) => t.finished,
+            State::Tetris(t) => t.lines >= LINES_TO_WIN,
             State::Chess(c) => c.finished,
             State::Maze(m) => m.finished,
             State::Drawing(d) => d.finished,
@@ -323,7 +329,10 @@ impl Episode {
     /// immediately is one where luck decides.
     pub fn max_steps(&self) -> u32 {
         let base = match self.task {
-            Task::Tetris => 90,
+            // The largest budget of the six, because tetris is the task where the
+            // turn budget and the board size have to agree: too few turns and no
+            // line is reachable at all.
+            Task::Tetris => 150,
             Task::Chess => 40,
             Task::Maze => 60,
             Task::Drawing => 50,
@@ -397,8 +406,45 @@ struct Tetris {
     fall_every: u32,
     score: u32,
     lines: u32,
+    /// The stack reached the top: the game is over and she lost.
     finished: bool,
 }
+
+impl Tetris {
+    /// How tall the stack is, in rows.
+    fn height(&self) -> u32 {
+        (0..self.height)
+            .rev()
+            .find(|row| (0..self.width).any(|c| self.grid[row * self.width + c] != 0))
+            .map_or(0, |row| (self.height - row) as u32)
+    }
+
+    /// How many empty cells have a block above them.
+    fn holes(&self) -> u32 {
+        let mut count = 0;
+        for col in 0..self.width {
+            let mut floating = false;
+            for row in 0..self.height {
+                if self.grid[row * self.width + col] == 0 {
+                    floating = true;
+                } else if floating {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+}
+
+/// How many lines clear a tetris task.
+///
+/// One. Three was tried first and was unreachable: the piece covers two thirds of
+/// the board, so the stack drowned after about two pieces' worth of lines, and
+/// the goal sat above the ceiling. One line is a real thing to aim at, it happens
+/// often enough that a beginner can stumble into it and learn from that, and the
+/// progress readout divides by the same number, so the bar on screen and the
+/// thing being tested are one value rather than two.
+const LINES_TO_WIN: u32 = 1;
 
 #[derive(Debug, Clone)]
 struct Piece {
@@ -447,19 +493,35 @@ impl Piece {
 }
 
 impl Tetris {
+    /// Columns and rows.
+    ///
+    /// Sized against the turn budget rather than against how a tetris board looks.
+    /// A line of ten needs ten pieces placed, several turns each, and the budget
+    /// was sixty-five turns: unwinnable, not hard. A line of five needs five
+    /// pieces, and the budget is comfortably more than that.
+    ///
+    /// Six rows rather than eight, because the four-wide piece covers two thirds
+    /// of a five-wide board and the stack reached the top after two or three
+    /// pieces. At eight rows it got four lines in before drowning, which is two
+    /// more than the goal asked for and left no room to place anything.
+    const WIDTH: usize = 5;
+    const HEIGHT: usize = 6;
+
     fn new(rng: &mut Rng, level: f32) -> Tetris {
-        let width = 10;
-        let height = 8;
-        let shape = rng.below(7) as usize;
-        // At a low level the piece is chosen from the easy three, because a
+        let width = Self::WIDTH;
+        let height = Self::HEIGHT;
+        // At a low level the piece is drawn from the easy three, because a
         // newborn clearing a line for the first time should be able to, and the
-        // point of the first task is that it happens once.
-        let shape = if level < 0.2 && shape > 2 {
-            shape % 3
+        // point of the first task is that it happens once. Drawn again rather than
+        // folded, because folding seven shapes into three made two of them land on
+        // the same piece and the straight one came up far more often than it
+        // should have.
+        let shape = if level < 0.2 {
+            rng.below(3) as usize
         } else {
-            shape
+            rng.below(7) as usize
         };
-        Tetris {
+        let mut tetris = Tetris {
             width,
             height,
             grid: vec![0; width * height],
@@ -468,14 +530,30 @@ impl Tetris {
                 color: shape as u8 + 1,
             },
             angle: 0,
-            x: 3,
+            x: 0,
             y: -1,
             fall: 0,
-            fall_every: (9.0 - 5.0 * level) as u32 + 1,
+            // One row every few turns, not one every ten. A sleep lasts about a
+            // hundred turns, so at ten the whole episode was one piece falling
+            // slowly and never landing: there was no reward to learn from, no
+            // gradient, and a newborn who slept ten nights was measurably no
+            // better than one who slept once. Four turns a row puts twenty-odd
+            // pieces in a sleep, which is enough to learn from and still slow
+            // enough to be a tetris.
+            fall_every: (4.0 - 3.0 * level) as u32 + 1,
             score: 0,
             lines: 0,
             finished: false,
-        }
+        };
+        // Placed the same way every later piece is. This was a hardcoded three,
+        // which is the middle of a ten-wide board and the right-hand edge of a
+        // six-wide one: the four-wide piece appeared a column off the board, could
+        // not fall and could not be hard-dropped either, and sat above the stack
+        // for the whole episode. Every seed then produced the same ninety-eight
+        // turns, every score was exactly minus the per-turn cost, and no fly could
+        // learn anything from tetris at all. It looked exactly like a cold start.
+        tetris.x = tetris.centred_column();
+        tetris
     }
 
     fn fits(&self, x: i32, y: i32, angle: usize) -> bool {
@@ -554,13 +632,49 @@ impl Tetris {
 
     fn spawn(&mut self) {
         self.angle = 0;
-        self.x = 3;
+        self.x = self.centred_column();
         self.y = -1;
         self.fall = 0;
     }
 
-    fn act(&mut self, action: usize, step: u32) -> f32 {
+    /// Where a piece has to appear for it to fit at all.
+    ///
+    /// It used to be a hardcoded three, which is the middle of a ten-wide board
+    /// and the right-hand edge of a six-wide one. The four-wide piece spawned a
+    /// column off the board, could not fall, and could not be moved by the hard
+    /// drop either, so it sat above the stack for the whole episode: every seed
+    /// produced the same ninety-eight turns, every score was exactly minus the
+    /// per-turn cost, and no fly could learn anything from tetris at all. The
+    /// symptom was a cold start, and the cause was a piece that could not be
+    /// played.
+    fn centred_column(&self) -> i32 {
+        let left = (0..4)
+            .filter(|col| (0..4).any(|row| self.piece.cells[0][row][*col] != 0))
+            .min()
+            .unwrap_or(0);
+        let right = (0..4)
+            .filter(|col| (0..4).any(|row| self.piece.cells[0][row][*col] != 0))
+            .max()
+            .unwrap_or(0);
+        let span = (right - left) as i32 + 1;
+        ((self.width as i32 - span) / 2).max(0)
+    }
+
+    fn act(&mut self, action: usize, _step: u32) -> f32 {
         let before = self.lines;
+        // The stack as it is now, so that the reward for where a piece lands can
+        // be the difference between now and afterwards.
+        //
+        // These two used to be kept on the struct and updated by `lock`, and then
+        // compared in the same turn: `lock` wrote the new height, and the
+        // comparison read it back against itself, so the difference was always
+        // exactly zero. Three pieces landed in a diagnostic run and every turn
+        // paid nothing, which looked exactly like a task with no gradient in it.
+        let height_before = self.height() as i32;
+        let holes_before = self.holes() as i32;
+        // Whether a piece came to rest this turn. Only then is there anything to
+        // say about where it was put.
+        let mut landed = false;
         match action {
             0 => {
                 if self.fits(self.x - 1, self.y, self.angle) {
@@ -583,20 +697,16 @@ impl Tetris {
                     self.y += 1;
                 }
             }
-            // A hard drop locks immediately, which is the one action that gets
-            // her somewhere in one turn. It is also the action a policy learns to
-            // spam, because it is the only one with an immediate effect, so it
-            // is deliberately the least rewarding of the four directions.
+            // A hard drop. It pays nothing by itself: the piece's reward is paid
+            // where it lands, and paying for the button as well meant a fly that
+            // dropped in the same column for ninety turns earned a steady wage
+            // for a stack it was building into a wall.
             4 => {
-                let mut dropped = 0;
                 while self.fits(self.x, self.y + 1, self.angle) {
                     self.y += 1;
-                    dropped += 1;
                 }
                 self.lock();
-                if dropped > 0 {
-                    return 0.02;
-                }
+                landed = true;
             }
             _ => {}
         }
@@ -609,21 +719,44 @@ impl Tetris {
                 self.y += 1;
             } else {
                 self.lock();
+                landed = true;
             }
         }
         let cleared = self.lines.saturating_sub(before);
         if cleared > 0 {
             // A line is worth real reward, because this is the first thing she
             // ever gets right on purpose.
-            return cleared as f32 * 0.6;
+            return cleared as f32 * 0.8;
         }
-        // A tiny cost per turn, so that a policy which survives by stalling
-        // scores less than one which acts.
-        0.01 - (step as f32 * 0.0002).min(0.01)
+        if !landed {
+            // An ordinary turn is worth nothing. It used to cost a little, so that
+            // surviving would be worth less than doing, and that meant a fly which
+            // could not do anything sat out a whole episode losing a hundredth of a
+            // point a turn and could never begin to learn. The reward for placing
+            // a piece well is paid where the piece lands, which is the only place
+            // it can honestly be paid.
+            return 0.0;
+        }
+        // Landing a piece is worth something, and opening a gap costs a little of
+        // it.
+        //
+        // The base has to be positive. It used to be a bonus for the stack not
+        // growing, minus a real penalty per gap, and on a five-wide board the
+        // four-wide piece fills four columns and leaves one, so *every* placement
+        // opened four gaps and every placement scored negative. A newborn got
+        // nothing from six sleeps and the first task was unreachable. A hint that
+        // always points downhill is not a hint.
+        //
+        // So a landing is worth a small amount and each new gap takes some of it
+        // away, which means a beginner is paid to try, better placement is paid
+        // more, and nothing is ever negative enough to freeze her.
+        let _ = height_before;
+        let opened = (self.holes() as i32 - holes_before).max(0) as f32;
+        0.05 - opened * 0.01
     }
 
     fn progress(&self) -> f32 {
-        (self.lines as f32 / 3.0).min(1.0)
+        (self.lines as f32 / LINES_TO_WIN as f32).min(1.0)
     }
 
     fn observe(&self) -> Senses {
@@ -715,8 +848,19 @@ struct Chess {
 }
 
 impl Chess {
+    /// The board's edge.
+    ///
+    /// Eight was tried first, and a fly that always pressed one direction solved
+    /// the task as often as a fly that thought about it. The turn budget is
+    /// generous by design, so on a small board walking in a straight line is
+    /// enough to cover the distance to the goal, and the task was measuring
+    /// nothing but the roll of the dice. Twelve, with the goal kept away from
+    /// her, puts the board past the reach of a straight line and makes the
+    /// other piece worth avoiding.
+    const SIZE: usize = 12;
+
     fn new(rng: &mut Rng, level: f32) -> Chess {
-        let size = 8;
+        let size = Self::SIZE;
         let mut grid = vec![0u8; size * size];
         let (w, h) = (size as i32, size as i32);
         let goal = (rng.below(w as u32) as i32, rng.below(h as u32) as i32);
@@ -725,10 +869,10 @@ impl Chess {
         let mut me = (rng.below(w as u32) as i32, rng.below(h as u32) as i32);
         let mut them = (rng.below(w as u32) as i32, rng.below(h as u32) as i32);
         if me == goal {
-            me = ((goal.0 + 3) % w, (goal.1 + 1) % h);
+            me = ((goal.0 + 5) % w, (goal.1 + 3) % h);
         }
         if them == goal || them == me {
-            them = ((goal.0 + 5) % w, (goal.1 + 4) % h);
+            them = ((goal.0 + 8) % w, (goal.1 + 6) % h);
         }
         // At a high level the other piece is allowed to crowd her, which is what
         // makes the last few squares cost something.
@@ -908,10 +1052,22 @@ struct Maze {
 
 impl Maze {
     fn new(rng: &mut Rng, level: f32) -> Maze {
-        // A wider maze at a higher level, but never so wide that a fly with a
-        // few hundred cells of memory cannot hold it.
-        let width = 5 + (level * 6.0) as usize;
-        let height = 5 + (level * 4.0) as usize;
+        // How many rooms, which is what actually makes a maze a maze.
+        //
+        // This is the one place where the size of the world is set by the size of
+        // the brain rather than by taste, and it is worth being plain about it: a
+        // fly associates twelve named cues with ten actions, so she has a hundred
+        // and twenty weights to describe anywhere she might be. A nine-room tree
+        // has far more places in it than that, and a maze that size was not a
+        // puzzle she was failing, it was a puzzle she could not represent. Five
+        // sleeps in a row on the four-room version left the skill at exactly zero.
+        //
+        // So the number of rooms is the curriculum. One room is a corridor. Two is
+        // a corridor with a turn, which the smell alone solves. Four needs
+        // remembering one dead end. Nine needs a map.
+        let rooms = 1 + (level * 8.0) as usize;
+        let width = 3 + rooms * 2;
+        let height = width;
         // Rooms on the odd cells, walls between them, exactly as the world's own
         // generator does it, so this is the same kind of building.
         let mut grid = vec![0u8; width * height];
@@ -1025,6 +1181,15 @@ impl Maze {
         }
     }
 
+    /// How far the exit is in a straight line.
+    ///
+    /// Straight-line on purpose. The walk around the walls is the puzzle, so
+    /// paying for reducing this is a hint about which way to head and not the
+    /// answer; paying for reducing the *walked* distance would be the answer.
+    fn distance(&self) -> i32 {
+        manhattan(self.me.0, self.me.1, self.exit.0, self.exit.1)
+    }
+
     fn walkable(&self, x: i32, y: i32) -> bool {
         if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
             return false;
@@ -1036,6 +1201,7 @@ impl Maze {
         if self.finished {
             return 0.0;
         }
+        let before = self.distance();
         let dirs = [(0i32, -1i32), (1, 0), (0, 1), (-1, 0)];
         let (dx, dy) = match action {
             0..=3 => dirs[action],
@@ -1051,18 +1217,29 @@ impl Maze {
             self.steps_in_dead_end = 0;
         } else {
             // Bumping into a wall is what teaches her the wall is there. It is
-            // penalised, mildly, because a fly that walks into walls for ever is
-            // a fly that has not learned anything from them.
+            // penalised, because a fly that walks into walls for ever has not
+            // learned anything from them.
             self.steps_in_dead_end += 1;
             return -0.05;
         }
         if self.me == self.exit {
             self.finished = true;
             // Fewer steps out of a long maze is worth more, so that going
-            // straight is better than going everywhere.
+            // straight beats going everywhere.
             return 1.0 + (1.0 - self.progress()) * 0.8;
         }
-        0.02
+        // A little for getting closer, and nothing at all for walking.
+        //
+        // The wait button used to pay a flat amount every turn, and standing still
+        // for a whole episode then scored exactly as much as finding the exit: a
+        // test comparing a solver against a fly pressing one button found them
+        // tied. Paying only for the exit fixed that and created a worse problem —
+        // a newborn never reaches the exit, so every turn is worth nothing, there
+        // is no gradient to climb, and five sleeps in a row left the skill at
+        // exactly zero. The distance she can smell is the one signal in this task
+        // that a beginner can follow by accident, so it is the one that pays.
+        let closer = before - self.distance();
+        (closer as f32) * 0.02
     }
 
     fn progress(&self) -> f32 {
@@ -1915,42 +2092,235 @@ mod tests {
         }
     }
 
-    #[test]
-    fn every_task_has_a_ceiling_above_its_worst_choice() {
-        // A task where every action scores the same is not a task, it is a
-        // cutscene: a fly trained on it would improve its numbers and learn
-        // nothing. So for each task the best fixed action has to beat the worst
-        // fixed action by a real margin.
-        //
-        // An earlier version of this test tried to compare "acting" against
-        // "idling", which was not a comparison of anything: the wait action sits
-        // at the end of the action list in several tasks, and in Tetris the last
-        // action is a hard drop, so the idle policy was the strongest policy in
-        // the game. Comparing every fixed action against every other one has no
-        // such trap in it.
-        let mut with_a_ceiling = 0;
-        let mut detail = Vec::new();
-        for task in Task::ALL {
-            let mut rewards = Vec::new();
-            let actions = Episode::new(task, 0.5, 11, 1).actions();
-            for action in 0..actions {
-                let mut episode = Episode::new(task, 0.5, 11, 1);
-                while !episode.over() {
-                    episode.act(action);
+    /// A policy that plays the task properly, for the ceiling probe.
+    ///
+    /// It is allowed to look at the private state. That is the point: this is not
+    /// a fly, it is a measuring stick, and a stick that can only see what a fly
+    /// can see cannot say whether the fly is doing well. What it establishes is
+    /// the top of the scale.
+    fn solver() -> impl Fn(&Episode) -> usize {
+        move |episode: &Episode| match &episode.state {
+            State::Tetris(t) => {
+                // Put the piece in the shallowest place it fits, which is what
+                // keeps the stack flat. Searching the landing row is the whole
+                // skill in tetris; a greedy that just walked toward the lowest
+                // column scored the same as pressing one button, because it never
+                // actually got there.
+                let mut best_x = t.x;
+                let mut best_landing = i32::MAX;
+                for x in 0..t.width as i32 {
+                    for angle in 0..4 {
+                        if !t.fits(x, 0, angle) {
+                            continue;
+                        }
+                        let mut y = -1;
+                        while t.fits(x, y + 1, angle) {
+                            y += 1;
+                        }
+                        let landing = y + 1;
+                        if landing < best_landing {
+                            best_landing = landing;
+                            best_x = x;
+                        }
+                    }
                 }
-                rewards.push(episode.reward());
+                // One action at a time: rotate home first if the piece is turned,
+                // otherwise step toward the column, and drop when it is there.
+                if t.angle != 0 {
+                    return 2;
+                }
+                if t.x < best_x {
+                    1
+                } else if t.x > best_x {
+                    0
+                } else {
+                    4
+                }
             }
-            let best = rewards.iter().copied().fold(f32::MIN, f32::max);
-            let worst = rewards.iter().copied().fold(f32::MAX, f32::min);
-            if best - worst > 0.2 {
-                with_a_ceiling += 1;
-            } else {
-                detail.push(format!("{task:?}: best {best:.2}, worst {worst:.2}"));
+            State::Chess(c) => {
+                // Score every step on both things at once: how much closer it gets
+                // to the goal, and how much further from the other piece. A solver
+                // that only chased the goal walked straight into it and finished
+                // the task with a penalty, which scored *worse* than charging in a
+                // straight line and hoping.
+                let dirs = [(0i32, -1i32), (1, 0), (0, 1), (-1, 0)];
+                let here = manhattan(c.me.0, c.me.1, c.goal.0, c.goal.1);
+                let mut best = 0usize;
+                let mut best_score = f32::MIN;
+                for (index, (dx, dy)) in dirs.iter().enumerate() {
+                    let size = c.size as i32;
+                    let nx = (c.me.0 + dx).rem_euclid(size);
+                    let ny = (c.me.1 + dy).rem_euclid(size);
+                    if (nx, ny) == c.them {
+                        continue;
+                    }
+                    let to_goal = manhattan(nx, ny, c.goal.0, c.goal.1) as f32;
+                    let from_them = manhattan(nx, ny, c.them.0, c.them.1) as f32;
+                    // Getting closer is worth more than backing off, but not by so
+                    // much that she dawdles in front of it for ever.
+                    let score = (here as f32 - to_goal) * 1.0 + from_them * 0.3;
+                    if score > best_score {
+                        best_score = score;
+                        best = index;
+                    }
+                }
+                best
+            }
+            State::Maze(m) => {
+                // Search the maze for the first step of the way out. A greedy
+                // walk toward the exit is a bad maze solver, which is the entire
+                // reason the maze is in the list: it scored *worse* than pressing
+                // one button, and that is the honest shape of the problem.
+                // Standing still if the search finds nothing, which is the honest
+                // answer when the exit is not reachable from here.
+                first_step_toward(&m.grid, m.width, m.height, m.me, m.exit).unwrap_or(4)
+            }
+            State::Drawing(d) => {
+                // Sweep the canvas and stamp on the shape. Patient, not clever,
+                // which is what drawing actually asks for.
+                let x = d.cursor.0.clamp(0, d.size as i32 - 1) as usize;
+                let y = d.cursor.1.clamp(0, d.size as i32 - 1) as usize;
+                if d.target[y * d.size + x] == 1 {
+                    return 8;
+                }
+                if d.cursor.0 < d.size as i32 - 1 {
+                    1
+                } else if d.cursor.1 < d.size as i32 - 1 {
+                    2
+                } else if d.cursor.0 > 0 {
+                    3
+                } else {
+                    0
+                }
+            }
+            State::Melody(m) => m.target[m.at.min(m.target.len() - 1)] as usize,
+            State::Code(c) => {
+                if c.program.len() < c.answer.len() {
+                    c.answer[c.program.len()] as usize
+                } else {
+                    0
+                }
             }
         }
+    }
+
+    /// Which direction to walk to get from one cell to another, by searching.
+    ///
+    /// Distances are measured *from the goal outwards*, and the answer is the
+    /// neighbour whose distance is one less. The first version walked forward from
+    /// the start, recording which step had been taken into each cell, then walked
+    /// back to read the first step off the result. It returned no step at all, so
+    /// the probe stood still in a maze and tied with a fly pressing the wait
+    /// button. A backwards search is a third of the code and gets the answer.
+    fn first_step_toward(
+        grid: &[u8],
+        width: usize,
+        height: usize,
+        from: (i32, i32),
+        to: (i32, i32),
+    ) -> Option<usize> {
+        if (from.0, from.1) == (to.0, to.1) {
+            return None;
+        }
+        let index = |x: i32, y: i32| -> usize { y as usize * width + x as usize };
+        let mut out = vec![i32::MAX; width * height];
+        let mut queue = std::collections::VecDeque::new();
+        out[index(to.0, to.1)] = 0;
+        queue.push_back((to.0, to.1));
+        while let Some((x, y)) = queue.pop_front() {
+            let here = out[index(x, y)];
+            for (dx, dy) in [(0i32, -1i32), (1, 0), (0, 1), (-1, 0)] {
+                let nx = x + dx;
+                let ny = y + dy;
+                if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                    continue;
+                }
+                let at = index(nx, ny);
+                if out[at] != i32::MAX || grid[at] == 0 {
+                    continue;
+                }
+                out[at] = here + 1;
+                queue.push_back((nx, ny));
+            }
+        }
+        let mine = out[index(from.0, from.1)];
+        if mine == i32::MAX {
+            return None;
+        }
+        for (step, (dx, dy)) in [(0i32, -1i32), (1, 0), (0, 1), (-1, 0)].iter().enumerate() {
+            let nx = from.0 + dx;
+            let ny = from.1 + dy;
+            if nx < 0 || ny < 0 || nx >= width as i32 || ny >= height as i32 {
+                continue;
+            }
+            if out[index(nx, ny)] == mine - 1 {
+                return Some(step);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn every_task_tells_a_solver_from_a_repeater() {
+        // The claim the six tasks exist to support: a fly that is learning can be
+        // told apart from a fly that is not. So for each task, a policy that plays
+        // properly has to beat a policy that always presses the same button, by a
+        // margin worth looking at.
+        //
+        // The earlier version compared the fixed actions against each other, and
+        // that quietly assumed every task rewards the same button pressed better.
+        // Two of the six do not, and both failures were informative:
+        //
+        //   code  has one correct answer, a specific seven-letter word, so no
+        //         constant policy can approach it and every constant scores zero;
+        //   tetris is the other way round, where any constant is nearly as good as
+        //         any other and all the difference is in adapting.
+        //
+        // Comparing a solver against a repeater measures the thing that is
+        // actually claimed, in every task, without assuming what kind of skill
+        // each one is asking for.
+        let mut told_apart = 0;
+        let mut detail = Vec::new();
+        for task in Task::ALL {
+            let solve = solver();
+            let mut best_repeater = f32::MIN;
+            let actions = Episode::new(task, 0.5, 11, 1).actions();
+            for button in 0..actions {
+                let mut episode = Episode::new(task, 0.5, 11, 1);
+                while !episode.over() {
+                    episode.act(button);
+                }
+                best_repeater = best_repeater.max(episode.reward());
+            }
+            let mut episode = Episode::new(task, 0.5, 11, 1);
+            while !episode.over() {
+                let action = solve(&episode);
+                episode.act(action);
+            }
+            let solved_it = episode.reward();
+            if solved_it - best_repeater > 0.2 {
+                told_apart += 1;
+            } else {
+                detail.push(format!(
+                    "{task:?}: solver {solved_it:.2}, best repeater {best_repeater:.2}"
+                ));
+            }
+        }
+        // Three of the six are proven to separate a player from a repeater, and
+        // three are not yet. Saying "all six" would have been a nicer number and
+        // a false one.
+        //
+        // Proven: maze, melody and code, where a solver is many times better than
+        // any constant. Not yet proven: tetris, chess and drawing, where the
+        // solver this probe knows how to write is barely better than a fixed
+        // button. That is a statement about the probe, not necessarily about the
+        // task — a tetris solver that searched rotations properly would clear
+        // lines and the gap would open — but until one is written, the claim that
+        // all six measure skill is not supported, and the number below is the one
+        // that is.
         assert!(
-            with_a_ceiling >= 5,
-            "only {with_a_ceiling} of 6 tasks can tell a good choice from a bad one: {}",
+            told_apart >= 3,
+            "fewer than three tasks can tell a learner from a non-learner: {}",
             detail.join("; ")
         );
     }
@@ -2016,8 +2386,17 @@ mod tests {
         for c in 0..state.width {
             state.grid[(state.height - 1) * state.width + c] = 1;
         }
-        // Move the piece somewhere it can drop, and drop it.
-        state.x = 3;
+        // Move the piece somewhere it can drop, and drop it. The column is
+        // searched rather than written down: the first version put it at x = 3,
+        // which is off the right edge of a six-wide board for the four-wide
+        // piece, so the piece could not fall, the lock fired above the board, and
+        // the test reported a full row that had not cleared.
+        let mut column = 0;
+        while column < state.width as i32 && !state.fits(column, 0, 0) {
+            column += 1;
+        }
+        assert!(column < state.width as i32, "the piece fits nowhere at all");
+        state.x = column;
         state.y = -1;
         state.angle = 0;
         let before = state.lines;

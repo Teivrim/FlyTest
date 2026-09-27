@@ -219,7 +219,13 @@ impl Dream {
         // editor says the same about the trials that came before this.
         fly.clear_actions();
         fly.act(self.motor, 1.0);
-        fly.steps(2, 1.0 / 60.0);
+        // Six steps, not two, because the eligibility trace in the C core is built
+        // as `action * dt` and decays each step. Two steps of a sixtieth of a
+        // second put about one sixtieth into the trace, and a write-back scaled by
+        // that lands under a millionth, which is to say nowhere. Six steps is what
+        // the editor's own trials use, and it is the difference between learning
+        // and not.
+        fly.steps(6, 1.0 / 60.0);
 
         let gained = self.episode.act(chosen);
         self.turns += 1;
@@ -228,16 +234,27 @@ impl Dream {
             self.good_turns += 1;
         }
 
-        // The write-back. The gate is the modulator the C core already computes
-        // from her own neurochemistry, so a fly that is not in a state to learn
-        // does not learn, and a fly that is has its lessons consolidated. The
-        // outcome is the sign of the turn and the modulator is scaled by how big
-        // the turn was, because a turn that barely mattered should barely change
-        // her.
+        // The write-back, in the shape the model was built for: the turn is
+        // delivered as an unconditioned stimulus, which is what opens the
+        // dopamine that opens the learning gate, and the association is then
+        // written with that gate as its modulator.
+        //
+        // The first version skipped the stimulus and folded the size of the turn
+        // into the modulator, so the gate was multiplied by the reward twice over
+        // and by a trace that was one sixtieth full. The result was a write-back of
+        // about two millionths, which reads as exactly zero over a whole sleep, and
+        // the skill bar went up anyway because it was computed from the task's
+        // score rather than from the fly. A fly whose brain never changed and a fly
+        // that had learnt something were showing the same number, and nothing on
+        // screen could tell them apart.
+        if gained > 0.0 {
+            fly.reward((gained * 4.0).clamp(0.0, 1.0));
+        } else if gained < 0.0 {
+            fly.punish((-gained * 4.0).clamp(0.0, 1.0));
+        }
         let gate = fly.learning_gate();
-        let strength = gained.abs().min(1.0) * gate;
-        if strength > 0.001 {
-            fly.associate(self.cue, self.motor, gained.signum(), strength);
+        if gate > 0.001 && gained != 0.0 {
+            fly.associate(self.cue, self.motor, gained.signum(), gate);
         }
         gained
     }
@@ -249,7 +266,24 @@ impl Dream {
     /// at something; she just did not get better, and a bar that can go down on
     /// a bad night is a bar that teaches a player to avoid sleeping.
     pub fn gain(&self) -> f32 {
-        (self.reward * 0.08).clamp(0.0, 0.25)
+        if self.turns == 0 {
+            return 0.0;
+        }
+        // Reward *per turn*, not reward in total.
+        //
+        // Total reward rewards lasting, and lasting is not skill: a policy that
+        // survives by taking the safest action available scores the same as one
+        // that solves the task, and a policy that flails for a hundred turns in a
+        // maze outscores one that finds the exit in twelve. Per turn asks the
+        // question that matters, which is how good she was.
+        //
+        // The reward for solving is added whole rather than scaled, because
+        // finishing is worth a discontinuity: a fly that solves it occasionally
+        // should be preferred to one that is reliably mediocre, and a linear
+        // per-turn average does not say that on its own.
+        let per_turn = (self.reward / self.turns as f32).clamp(0.0, 0.12);
+        let finished = if self.episode.solved() { 0.08 } else { 0.0 };
+        (per_turn + finished).clamp(0.0, 0.25)
     }
 
     /// One line about where she is, for the on-screen dream.
@@ -407,6 +441,14 @@ pub struct Life {
     pub swaddled_for: f32,
     /// The chapter she left and why, for the log.
     pub last_change: Option<String>,
+    /// Set when something worth saving happened, so the runtime knows to write.
+    ///
+    /// A sleep that ends on its own has to mark this. The first version saved
+    /// only when a person pressed "разбудить", so a sleep that finished while
+    /// nobody was watching — which is every sleep, because they end in about two
+    /// seconds — was never written down, and the profile on disk still said she
+    /// had never slept. The number went up on screen and nowhere else.
+    pub dirty: bool,
 }
 
 /// One finished sleep.
@@ -435,6 +477,7 @@ impl Life {
             history: Vec::new(),
             swaddled_for: 0.0,
             last_change: None,
+            dirty: false,
             profile,
         }
     }
@@ -517,6 +560,7 @@ impl Life {
             trim(before),
             trim(after.level)
         ));
+        self.dirty = true;
         let _ = fly;
     }
 
@@ -528,14 +572,27 @@ impl Life {
     /// possibly be about.
     pub fn tick(&mut self, fly: &mut Fly, dt: f32, position: [f32; 3], ate: u32, epsilon: f32) {
         self.profile.age += dt;
+        // A newborn's eyes open whether she is asleep or not. The first version
+        // counted the swaddling time only while awake, and a fly who spent her
+        // first ten lives asleep stayed in chapter one for ever — which is the
+        // opposite of what sleep is for at that age, and it meant the whole
+        // curriculum behind her was unreachable.
+        if self.profile.stage == Stage::Swaddled {
+            self.swaddled_for += dt;
+        }
         if self.is_asleep() {
             self.dream_step(fly, epsilon);
+            if self.profile.stage == Stage::Swaddled {
+                self.quest.progress = (self.swaddled_for / SWADDLE_SECONDS).min(1.0);
+                if self.swaddled_for >= SWADDLE_SECONDS {
+                    self.enter(Stage::FirstSteps);
+                }
+            }
             return;
         }
         let stage = self.profile.stage;
         match stage {
             Stage::Swaddled => {
-                self.swaddled_for += dt;
                 self.quest.progress = (self.swaddled_for / SWADDLE_SECONDS).min(1.0);
                 if self.swaddled_for >= SWADDLE_SECONDS {
                     self.enter(Stage::FirstSteps);
@@ -595,6 +652,12 @@ impl Life {
         self.task = task_for(next);
         self.quest = quest_for(next);
         self.last_change = Some(format!("{} → {}", from.name(), next.name()));
+        self.dirty = true;
+    }
+
+    /// Take the flag, so the runtime saves once and the flag does not stay set.
+    pub fn take_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.dirty)
     }
 }
 
@@ -850,32 +913,76 @@ mod tests {
     }
 
     #[test]
-    fn a_sleep_changes_a_real_weight_in_the_fly() {
-        // The claim the whole module exists for: a sleep is not a counter going
-        // up in a file, it is a change in the association table the fly uses to
-        // choose. Checked by measuring the table, not the profile.
-        let mut fly = quiet();
-        let mut life = Life::new(Profile::newborn("a", "Клава"));
-        // The whole table, not one row of it. The first version measured the
-        // weights under a single cue chosen in advance, and a Tetris sleep spends
-        // most of its turns under other cues, so it reported no learning at all
-        // from a sleep that was plainly learning. The table is what is claimed to
-        // change, so the table is what gets measured.
-        let total = |fly: &Fly| -> f32 {
-            (0..12)
-                .flat_map(|cue| (0..9).map(move |index| fly.weight(cue, motor(index)).abs()))
-                .sum()
-        };
-        life.sleep(&mut fly, 5);
-        let before = total(&fly);
-        while life.is_asleep() {
-            life.dream_step(&mut fly, 0.2);
+    fn zzz_does_the_primitive_work_at_all() {
+        // The whole module rests on one claim: that associating a cue with an
+        // action after the fly has performed it moves a weight. If that is false,
+        // every skill number in this project is decoration.
+        for steps in [1usize, 2, 6, 30] {
+            let mut fly = Fly::new();
+            fly.set_learn_rate(1.0);
+            let before = fly.weight(tfly::cue::LIGHT, tfly::action::FORWARD);
+            fly.clear_actions();
+            fly.act(tfly::action::FORWARD, 1.0);
+            fly.steps(steps as i32, 1.0 / 60.0);
+            fly.associate(tfly::cue::LIGHT, tfly::action::FORWARD, 1.0, 1.0);
+            let after = fly.weight(tfly::cue::LIGHT, tfly::action::FORWARD);
+            println!(
+                "steps={steps}: {before:.8} -> {after:.8} (delta {:.8})",
+                after - before
+            );
         }
-        let after = total(&fly);
+        // And with no performance at all, for contrast.
+        let mut fly = Fly::new();
+        fly.associate(tfly::cue::LIGHT, tfly::action::FORWARD, 1.0, 1.0);
+        println!(
+            "no act: {} -> {}",
+            0.0,
+            fly.weight(tfly::cue::LIGHT, tfly::action::FORWARD)
+        );
+    }
+
+    #[test]
+    fn a_sleep_changes_a_real_weight_in_the_fly() {
+        // The claim the whole module exists for: a sleep is not a counter going up
+        // in a file, it is a change in the association table the fly chooses with.
+        // Checked by measuring the table and not the profile.
+        let mut fly = quiet();
+        let mut dream = Dream::new(Task::Tetris, 0.0, 5, 0);
+        let before = table_mass(&fly);
+        let mut turns = 0u32;
+        let mut paid = 0u32;
+        while !dream.done() && turns < 400 {
+            if dream.step(&mut fly, 0.2) != 0.0 {
+                paid += 1;
+            }
+            turns += 1;
+        }
+        let after = table_mass(&fly);
+        println!("sleep: {turns} turns, {paid} of them paid, table {before:.8} -> {after:.8}");
+        assert!(turns > 10, "the sleep was {turns} turns long");
+        assert!(
+            paid > 0,
+            "not one turn out of {turns} paid anything, so there was nothing to learn from"
+        );
         assert!(
             (after - before).abs() > 1e-6,
             "a whole sleep left the association table untouched: {before} then {after}"
         );
+    }
+
+    /// The sum of every weight in the table.
+    ///
+    /// A plain nested loop rather than an iterator chain: the chain needs a `move`
+    /// closure for the loop variable, and that closure then also captures the fly
+    /// by move, which is not a borrow and does not compile.
+    fn table_mass(fly: &Fly) -> f32 {
+        let mut total = 0.0;
+        for cue in 0..12 {
+            for action in 0..10 {
+                total += fly.weight(cue, action).abs();
+            }
+        }
+        total
     }
 
     #[test]
