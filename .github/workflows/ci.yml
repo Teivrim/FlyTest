@@ -72,8 +72,15 @@ jobs:
       - name: Установить Rust под gnu-хост
         shell: pwsh
         run: |
+          # rustfmt and clippy are named explicitly because
+          # `rustup set profile minimal` installs rustc and cargo and nothing
+          # else. Without this the gate failed on checks 1 and 2 with
+          #   help: run `rustup component add rustfmt` to install it
+          # and nothing in the log pointed at the profile line that caused it.
           rustup set profile minimal
-          rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update
+          rustup toolchain install stable-x86_64-pc-windows-gnu `
+            --no-self-update `
+            --component rustfmt,clippy
           rustup default stable-x86_64-pc-windows-gnu
           rustup run stable-x86_64-pc-windows-gnu rustc --version
 
@@ -128,7 +135,9 @@ jobs:
 
       - name: Установить Rust
         run: |
-          rustup toolchain install stable-x86_64-pc-windows-gnu --no-self-update
+          rustup toolchain install stable-x86_64-pc-windows-gnu `
+            --no-self-update `
+            --component rustfmt,clippy
           rustup default stable-x86_64-pc-windows-gnu
 
       - name: Установить Python и Node
